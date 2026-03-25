@@ -28,7 +28,7 @@ Claude handles everything else — discovering services, reading docs, calling A
 You ask Claude to use a paid API
         │
         ▼
-Claude reads the SKILL.md, calls the endpoint
+Claude reads the instruction, calls the endpoint
         │
         ▼
 Server responds 402 Payment Required
