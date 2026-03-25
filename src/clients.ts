@@ -43,11 +43,15 @@ export async function createHttpClient(
 
     const chain = network === 'base-sepolia' ? baseSepolia : base
     const account = privateKeyToAccount(config.evmPrivateKey as `0x${string}`)
-    const signer = createWalletClient({
+    const walletClient = createWalletClient({
       account,
       chain,
       transport: http()
     }).extend(publicActions)
+
+    // The SDK expects signer.address at the top level,
+    // but viem stores it at walletClient.account.address
+    const signer = Object.assign(walletClient, { address: account.address })
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     registerExactEvmScheme(client, { signer: signer as any })

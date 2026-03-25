@@ -168,20 +168,20 @@ export function registerX402Fetch(
         // Step 5: Sign the payment
         const httpClient = await createHttpClient(network, config)
         const payload = await httpClient.createPaymentPayload(paymentRequired)
-        const paymentHeaders = httpClient.encodePaymentSignatureHeader(payload)
-        const paymentHeader =
-          paymentHeaders['X-PAYMENT'] ?? paymentHeaders['x-payment']
+        const signatureHeaders =
+          httpClient.encodePaymentSignatureHeader(payload)
 
-        if (!paymentHeader) {
+        if (!signatureHeaders || Object.keys(signatureHeaders).length === 0) {
           throw new Error('Failed to generate payment header')
         }
 
         // Step 6: Retry the request with the payment header
+        // v1 returns X-PAYMENT, v2 returns PAYMENT-SIGNATURE
         const retryOptions: RequestInit = {
           method,
           headers: {
             ...(headers ?? {}),
-            'X-PAYMENT': paymentHeader
+            ...signatureHeaders
           }
         }
         if (body && method !== 'GET') {

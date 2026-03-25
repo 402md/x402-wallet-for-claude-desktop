@@ -43,7 +43,7 @@ find node_modules -name ".prettierrc*" -delete 2>/dev/null || true
 find node_modules -name "tsconfig*.json" -delete 2>/dev/null || true
 find node_modules -name ".npmignore" -delete 2>/dev/null || true
 find node_modules -type d -name "__tests__" -exec rm -rf {} + 2>/dev/null || true
-find node_modules -type d -name "test" -exec rm -rf {} + 2>/dev/null || true
+find node_modules -type d -name "test" -not -path "*/viem/*" -not -path "*/ox/*" -exec rm -rf {} + 2>/dev/null || true
 find node_modules -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true
 find node_modules -type d -name "docs" -exec rm -rf {} + 2>/dev/null || true
 find node_modules -type d -name "examples" -exec rm -rf {} + 2>/dev/null || true

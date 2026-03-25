@@ -93,20 +93,23 @@ export function registerPay(
               amount: toAtomicUnits(amount, net),
               payTo: recipient,
               maxTimeoutSeconds: 300,
-              extra: {}
+              extra: getExtra(net)
             }
           ]
         }
 
         const payload = await httpClient.createPaymentPayload(paymentRequired)
-        const headers = httpClient.encodePaymentSignatureHeader(payload)
-        const paymentHeader = headers['X-PAYMENT'] ?? headers['x-payment']
+        const signatureHeaders =
+          httpClient.encodePaymentSignatureHeader(payload)
 
-        if (!paymentHeader) {
+        if (!signatureHeaders || Object.keys(signatureHeaders).length === 0) {
           throw new Error('Failed to generate payment header')
         }
 
         spending.record(amount, recipient, network)
+
+        // v1 returns X-PAYMENT, v2 returns PAYMENT-SIGNATURE
+        const [[headerName, headerValue]] = Object.entries(signatureHeaders)
 
         return {
           content: [
@@ -114,12 +117,13 @@ export function registerPay(
               type: 'text' as const,
               text: JSON.stringify(
                 {
-                  paymentHeader,
+                  paymentHeader: headerValue,
+                  headerName,
                   amount: `${amount} USDC`,
                   recipient,
                   network,
                   resource: resource ?? null,
-                  hint: 'Set this as the X-PAYMENT header in your HTTP request.'
+                  hint: `Set this as the ${headerName} header in your HTTP request.`
                 },
                 null,
                 2
@@ -151,6 +155,20 @@ function getAssetAddress(network: PaymentNetwork): string {
     'base-sepolia': '0x036CbD53842c5426634e7929541eC2318f3dCF7e'
   }
   return addresses[network]
+}
+
+function getExtra(network: PaymentNetwork): Record<string, unknown> {
+  if (isStellarNetwork(network)) {
+    return { areFeesSponsored: true }
+  }
+  // EIP-712 domain params required by signEIP3009Authorization
+  const eip712: Record<PaymentNetwork, { name: string; version: string }> = {
+    base: { name: 'USD Coin', version: '2' },
+    'base-sepolia': { name: 'USDC', version: '2' },
+    stellar: { name: '', version: '' },
+    'stellar-testnet': { name: '', version: '' }
+  }
+  return eip712[network]
 }
 
 function toAtomicUnits(amount: string, network: PaymentNetwork): string {

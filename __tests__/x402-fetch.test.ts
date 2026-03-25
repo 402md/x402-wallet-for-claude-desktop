@@ -156,7 +156,7 @@ describe('x402_fetch tool', () => {
 
     mockCreatePaymentPayload.mockResolvedValue({ payload: 'signed' })
     mockEncodePaymentSignatureHeader.mockReturnValue({
-      'X-PAYMENT': 'signed-header-value'
+      'PAYMENT-SIGNATURE': 'signed-header-value'
     })
 
     const server = { tool: vi.fn() } as unknown as McpServer
@@ -185,9 +185,11 @@ describe('x402_fetch tool', () => {
     // Verify fetch was called twice
     expect(mockFetch).toHaveBeenCalledTimes(2)
 
-    // Verify retry had X-PAYMENT header
+    // Verify retry had PAYMENT-SIGNATURE header (v2)
     const retryCall = mockFetch.mock.calls[1]
-    expect(retryCall[1].headers['X-PAYMENT']).toBe('signed-header-value')
+    expect(retryCall[1].headers['PAYMENT-SIGNATURE']).toBe(
+      'signed-header-value'
+    )
   })
 
   it('parses payment info from base64 Payment-Required header', async () => {
@@ -231,7 +233,7 @@ describe('x402_fetch tool', () => {
 
     mockCreatePaymentPayload.mockResolvedValue({ payload: 'signed' })
     mockEncodePaymentSignatureHeader.mockReturnValue({
-      'X-PAYMENT': 'signed-header-value'
+      'PAYMENT-SIGNATURE': 'signed-header-value'
     })
 
     const server = { tool: vi.fn() } as unknown as McpServer
@@ -409,7 +411,7 @@ describe('x402_fetch tool', () => {
 
     mockCreatePaymentPayload.mockResolvedValue({ payload: 'signed' })
     mockEncodePaymentSignatureHeader.mockReturnValue({
-      'X-PAYMENT': 'header'
+      'PAYMENT-SIGNATURE': 'header'
     })
 
     const server = { tool: vi.fn() } as unknown as McpServer

@@ -158,7 +158,7 @@ describe('pay tool', () => {
     const mockPayload = { x402Version: 2, payload: 'signed-data' }
     mockCreatePaymentPayload.mockResolvedValue(mockPayload)
     mockEncodePaymentSignatureHeader.mockReturnValue({
-      'X-PAYMENT': 'base64-payment-header-value'
+      'PAYMENT-SIGNATURE': 'base64-payment-header-value'
     })
 
     const server = { tool: vi.fn() } as unknown as McpServer
@@ -181,10 +181,11 @@ describe('pay tool', () => {
 
     const parsed = JSON.parse(result.content[0].text)
     expect(parsed.paymentHeader).toBe('base64-payment-header-value')
+    expect(parsed.headerName).toBe('PAYMENT-SIGNATURE')
     expect(parsed.amount).toBe('0.05 USDC')
     expect(parsed.recipient).toBe('GABC...')
     expect(parsed.network).toBe('stellar-testnet')
-    expect(parsed.hint).toContain('X-PAYMENT')
+    expect(parsed.hint).toContain('PAYMENT-SIGNATURE')
   })
 
   it('records spending after successful payment', async () => {
@@ -193,7 +194,7 @@ describe('pay tool', () => {
       payload: 'data'
     })
     mockEncodePaymentSignatureHeader.mockReturnValue({
-      'X-PAYMENT': 'header-value'
+      'PAYMENT-SIGNATURE': 'header-value'
     })
 
     const server = { tool: vi.fn() } as unknown as McpServer
@@ -217,6 +218,72 @@ describe('pay tool', () => {
     expect(parseFloat(summary.spentSession)).toBeCloseTo(0.05)
     expect(summary.recentPayments).toHaveLength(1)
     expect(summary.recentPayments[0].recipient).toBe('GABC...')
+  })
+
+  it('includes areFeesSponsored in extra for Stellar networks', async () => {
+    mockCreatePaymentPayload.mockResolvedValue({
+      x402Version: 2,
+      payload: 'data'
+    })
+    mockEncodePaymentSignatureHeader.mockReturnValue({
+      'PAYMENT-SIGNATURE': 'header-value'
+    })
+
+    const server = { tool: vi.fn() } as unknown as McpServer
+    const config = makeConfig({
+      canPay: true,
+      canPayStellar: true,
+      stellarSecret: 'STEST...',
+      mode: 'STELLAR_ONLY'
+    })
+    const spending = new SpendingTracker(config.budget)
+    registerPay(server, config, spending)
+
+    const handler = extractToolHandler(server)
+    await handler({
+      amount: '0.05',
+      recipient: 'GABC...',
+      network: 'stellar-testnet'
+    })
+
+    // Verify createPaymentPayload was called with areFeesSponsored in extra
+    const paymentRequired = mockCreatePaymentPayload.mock.calls[0][0]
+    expect(paymentRequired.accepts[0].extra).toEqual({
+      areFeesSponsored: true
+    })
+  })
+
+  it('includes EIP-712 domain params in extra for EVM networks', async () => {
+    mockCreatePaymentPayload.mockResolvedValue({
+      x402Version: 2,
+      payload: 'data'
+    })
+    mockEncodePaymentSignatureHeader.mockReturnValue({
+      'PAYMENT-SIGNATURE': 'header-value'
+    })
+
+    const server = { tool: vi.fn() } as unknown as McpServer
+    const config = makeConfig({
+      canPay: true,
+      canPayEvm: true,
+      evmPrivateKey: '0xabc',
+      mode: 'EVM_ONLY'
+    })
+    const spending = new SpendingTracker(config.budget)
+    registerPay(server, config, spending)
+
+    const handler = extractToolHandler(server)
+    await handler({
+      amount: '0.05',
+      recipient: '0xRecipient',
+      network: 'base-sepolia'
+    })
+
+    const paymentRequired = mockCreatePaymentPayload.mock.calls[0][0]
+    expect(paymentRequired.accepts[0].extra).toEqual({
+      name: 'USDC',
+      version: '2'
+    })
   })
 
   it('returns error when payment signing fails', async () => {
