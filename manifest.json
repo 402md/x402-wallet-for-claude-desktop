@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "x402-wallet",
-  "display_name": "x402 Wallet — USDC Payments for AI Agents",
+  "display_name": "x402 Wallet by 402.md — USDC Payments for AI Agents",
   "version": "0.1.0",
   "icon": "icon.png",
   "description": "Minimal x402 wallet for Claude. Check USDC balance and sign payments on Stellar or Base — no API keys, no accounts.",
