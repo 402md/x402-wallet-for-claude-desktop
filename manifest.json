@@ -3,6 +3,7 @@
   "name": "x402-wallet",
   "display_name": "x402 Wallet — USDC Payments for AI Agents",
   "version": "0.1.0",
+  "icon": "icon.png",
   "description": "Minimal x402 wallet for Claude. Check USDC balance and sign payments on Stellar or Base — no API keys, no accounts.",
   "long_description": "Give Claude a USDC wallet. This extension adds two tools:\n\n- **check_balance** — View your USDC balance and wallet address\n- **pay** — Sign an x402 payment authorization (USDC on Stellar or Base)\n\nClaude handles everything else — discovering skills, reading SKILL.md docs, calling APIs. The wallet just signs payments when needed.\n\nBudget limits protect your funds: set max per call and max per day.",
   "author": {
