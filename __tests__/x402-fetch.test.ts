@@ -143,6 +143,7 @@ describe('x402_fetch tool', () => {
     mockFetch.mockResolvedValueOnce({
       status: 402,
       statusText: 'Payment Required',
+      headers: { get: () => null },
       json: vi.fn().mockResolvedValue(paymentRequiredBody)
     })
 
@@ -189,10 +190,78 @@ describe('x402_fetch tool', () => {
     expect(retryCall[1].headers['X-PAYMENT']).toBe('signed-header-value')
   })
 
+  it('parses payment info from base64 Payment-Required header', async () => {
+    const paymentRequiredBody = {
+      x402Version: 2,
+      error: 'Payment required',
+      resource: { url: '', description: '', mimeType: '' },
+      accepts: [
+        {
+          scheme: 'exact',
+          network: 'eip155:84532',
+          asset: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+          amount: '50000',
+          payTo: '0xRecipient',
+          maxTimeoutSeconds: 300,
+          extra: {}
+        }
+      ]
+    }
+
+    const headerValue = Buffer.from(
+      JSON.stringify(paymentRequiredBody)
+    ).toString('base64')
+
+    // 402 with payment info in header, empty body
+    mockFetch.mockResolvedValueOnce({
+      status: 402,
+      statusText: 'Payment Required',
+      headers: {
+        get: (name: string) =>
+          name === 'Payment-Required' ? headerValue : null
+      },
+      json: vi.fn().mockResolvedValue({})
+    })
+
+    mockFetch.mockResolvedValueOnce({
+      status: 200,
+      statusText: 'OK',
+      text: vi.fn().mockResolvedValue('paid via header')
+    })
+
+    mockCreatePaymentPayload.mockResolvedValue({ payload: 'signed' })
+    mockEncodePaymentSignatureHeader.mockReturnValue({
+      'X-PAYMENT': 'signed-header-value'
+    })
+
+    const server = { tool: vi.fn() } as unknown as McpServer
+    const config = makeConfig({
+      canPay: true,
+      canPayEvm: true,
+      evmPrivateKey: '0xabc',
+      mode: 'EVM_ONLY'
+    })
+    const spending = new SpendingTracker(config.budget)
+    registerX402Fetch(server, config, spending)
+
+    const handler = extractToolHandler(server)
+    const result = (await handler({
+      url: 'https://api.example.com/paid',
+      method: 'GET'
+    })) as ToolResult
+
+    const parsed = JSON.parse(result.content[0].text)
+    expect(parsed.status).toBe(200)
+    expect(parsed.body).toBe('paid via header')
+    expect(parsed.payment.amount).toBe('0.050000 USDC')
+    expect(parsed.payment.network).toBe('base-sepolia')
+  })
+
   it('returns error when 402 has no accepts', async () => {
     mockFetch.mockResolvedValueOnce({
       status: 402,
       statusText: 'Payment Required',
+      headers: { get: () => null },
       json: vi.fn().mockResolvedValue({
         x402Version: 2,
         error: '',
@@ -225,6 +294,7 @@ describe('x402_fetch tool', () => {
     mockFetch.mockResolvedValueOnce({
       status: 402,
       statusText: 'Payment Required',
+      headers: { get: () => null },
       json: vi.fn().mockResolvedValue({
         x402Version: 2,
         error: '',
@@ -268,6 +338,7 @@ describe('x402_fetch tool', () => {
     mockFetch.mockResolvedValueOnce({
       status: 402,
       statusText: 'Payment Required',
+      headers: { get: () => null },
       json: vi.fn().mockResolvedValue({
         x402Version: 2,
         error: '',
@@ -312,6 +383,7 @@ describe('x402_fetch tool', () => {
       .mockResolvedValueOnce({
         status: 402,
         statusText: 'Payment Required',
+        headers: { get: () => null },
         json: vi.fn().mockResolvedValue({
           x402Version: 2,
           error: '',

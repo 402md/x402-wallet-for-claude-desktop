@@ -107,8 +107,21 @@ export function registerX402Fetch(
         }
 
         // Step 2: Parse the 402 Payment Required response
-        const paymentRequired: PaymentRequiredBody =
-          await initialResponse.json()
+        // x402 v2 sends payment info in the Payment-Required header (base64-encoded JSON)
+        // Fall back to the response body for backwards compatibility
+        let paymentRequired: PaymentRequiredBody
+
+        const paymentRequiredHeader =
+          initialResponse.headers.get('Payment-Required')
+
+        if (paymentRequiredHeader) {
+          const decoded = Buffer.from(paymentRequiredHeader, 'base64').toString(
+            'utf-8'
+          )
+          paymentRequired = JSON.parse(decoded)
+        } else {
+          paymentRequired = await initialResponse.json()
+        }
 
         if (!paymentRequired.accepts || paymentRequired.accepts.length === 0) {
           return {
