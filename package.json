@@ -1,7 +1,7 @@
 {
   "name": "x402-wallet-mcp",
   "version": "0.1.0",
-  "description": "Minimal MCP server — x402 wallet with check_balance and pay tools",
+  "description": "Minimal MCP server — x402 wallet with check_balance, pay, and x402_fetch tools",
   "type": "module",
   "bin": {
     "x402-wallet-mcp": "./dist/index.js"

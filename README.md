@@ -1,6 +1,6 @@
 # x402-wallet
 
-Give Claude a USDC wallet. Two tools. That's it.
+Give Claude a USDC wallet. Three tools. That's it.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![x402](https://img.shields.io/badge/x402-v2-green)](https://x402.org)
@@ -13,12 +13,13 @@ Give Claude a USDC wallet. Two tools. That's it.
 
 ## What is this?
 
-A minimal [MCP](https://modelcontextprotocol.io) server that gives Claude Desktop a USDC wallet on **Stellar** or **Base**. It adds exactly two tools:
+A minimal [MCP](https://modelcontextprotocol.io) server that gives Claude Desktop a USDC wallet on **Stellar** or **Base**. It adds exactly three tools:
 
-| Tool            | What it does                                             |
-| --------------- | -------------------------------------------------------- |
-| `check_balance` | Shows your USDC balance and wallet address               |
-| `pay`           | Signs an x402 payment and returns the `X-PAYMENT` header |
+| Tool            | What it does                                                               |
+| --------------- | -------------------------------------------------------------------------- |
+| `check_balance` | Shows your USDC balance and wallet address                                 |
+| `pay`           | Signs an x402 payment and returns the `X-PAYMENT` header                   |
+| `x402_fetch`    | Fetches a URL with automatic 402 payment — sign and retry in a single call |
 
 Claude handles everything else — discovering services, reading docs, calling APIs. The wallet just signs payments when needed.
 
@@ -28,19 +29,19 @@ Claude handles everything else — discovering services, reading docs, calling A
 You ask Claude to use a paid API
         │
         ▼
-Claude reads the instruction, calls the endpoint
+Claude calls `x402_fetch` with the URL
         │
         ▼
-Server responds 402 Payment Required
+Wallet fetches the endpoint → gets 402 Payment Required
         │
         ▼
-Claude calls `pay` tool → wallet signs USDC authorization
+Wallet signs USDC authorization automatically
         │
         ▼
-Claude retries with X-PAYMENT header → gets the response
+Wallet retries with X-PAYMENT header → returns the response
 ```
 
-No API keys. No accounts. The payment IS the authentication.
+Everything happens in a single tool call. No API keys. No accounts. The payment IS the authentication.
 
 ## Install
 
@@ -117,6 +118,34 @@ Both default to conservative values ($0.10/call, $20/day). Adjust as needed.
 
 ## Tools
 
+### `x402_fetch`
+
+Fetches a URL with automatic x402 payment handling. If the server responds 402, the wallet signs the payment and retries — all in one call.
+
+**Parameters:**
+
+| Param     | Type    | Description                          |
+| --------- | ------- | ------------------------------------ |
+| `url`     | string  | URL to fetch                         |
+| `method`  | string? | HTTP method (default: `GET`)         |
+| `headers` | object? | Optional HTTP headers                |
+| `body`    | string? | Optional request body (for POST/PUT) |
+
+**Returns:**
+
+```json
+{
+  "status": 200,
+  "statusText": "OK",
+  "body": "{\"result\": \"paid content\"}",
+  "payment": {
+    "amount": "0.05 USDC",
+    "recipient": "0xABC...",
+    "network": "base-sepolia"
+  }
+}
+```
+
 ### `check_balance`
 
 Returns your wallet address, USDC balance, network, and mode.
@@ -132,7 +161,7 @@ Returns your wallet address, USDC balance, network, and mode.
 
 ### `pay`
 
-Signs a USDC payment authorization for an x402 endpoint.
+Signs a USDC payment authorization for an x402 endpoint. Use this for manual control — for most cases, prefer `x402_fetch`.
 
 **Parameters:**
 
@@ -167,7 +196,7 @@ npm run dev
 # Build
 npm run build
 
-# Test (46 tests)
+# Test (56 tests)
 npm test
 
 # Lint + format
@@ -194,7 +223,8 @@ src/
 ├── clients.ts            # x402 client creation (Stellar/EVM)
 └── tools/
     ├── check-balance.ts  # check_balance tool
-    └── pay.ts            # pay tool
+    ├── pay.ts            # pay tool
+    └── x402-fetch.ts     # x402_fetch tool (fetch + auto-pay)
 ```
 
 ### Built on
