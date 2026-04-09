@@ -29,9 +29,15 @@ export function registerPay(
       resource: z
         .string()
         .optional()
-        .describe('URL of the resource being paid for')
+        .describe('URL of the resource being paid for'),
+      extra: z
+        .record(z.unknown())
+        .optional()
+        .describe(
+          'Optional extra metadata from accepts[0].extra in the PAYMENT-REQUIRED header. Must be passed through exactly as received and included in the signed payload.'
+        )
     },
-    async ({ amount, recipient, network, resource }) => {
+    async ({ amount, recipient, network, resource, extra }) => {
       if (!config.canPay) {
         return {
           content: [
@@ -93,7 +99,7 @@ export function registerPay(
               amount: toAtomicUnits(amount, net),
               payTo: recipient,
               maxTimeoutSeconds: 300,
-              extra: getExtra(net)
+              extra: extra ?? getExtra(net)
             }
           ]
         }
