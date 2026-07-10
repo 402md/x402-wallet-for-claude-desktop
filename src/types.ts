@@ -3,16 +3,20 @@ export type PaymentNetwork =
   | 'stellar-testnet'
   | 'base'
   | 'base-sepolia'
+  | 'solana'
+  | 'solana-devnet'
 
 export interface AppConfig {
   stellarSecret?: string
   evmPrivateKey?: string
+  solanaSecret?: string
   network: PaymentNetwork
   budget: BudgetConfig
   canPay: boolean
   canPayStellar: boolean
   canPayEvm: boolean
-  mode: 'READ_ONLY' | 'STELLAR_ONLY' | 'EVM_ONLY' | 'FULL'
+  canPaySolana: boolean
+  mode: 'READ_ONLY' | 'STELLAR_ONLY' | 'EVM_ONLY' | 'SOLANA_ONLY' | 'FULL'
   reload(): void
 }
 
@@ -24,6 +28,7 @@ export interface BudgetConfig {
 export interface WalletFileConfig {
   stellarSecret?: string
   evmPrivateKey?: string
+  solanaSecret?: string
   network?: string
   createdAt?: string
 }

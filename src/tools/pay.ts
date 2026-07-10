@@ -6,7 +6,8 @@ import {
   createHttpClient,
   getCaip2Network,
   isStellarNetwork,
-  isEvmNetwork
+  isEvmNetwork,
+  isSolanaNetwork
 } from '@/clients.js'
 import { ensurePermit2Allowance } from '@/permit2.js'
 import type { PaymentNetwork } from '@/types.js'
@@ -23,25 +24,34 @@ export function registerPay(
       amount: z.string().describe('USDC amount as decimal string, e.g. "0.05"'),
       recipient: z
         .string()
-        .describe('Recipient address (EVM 0x... or Stellar G.../C...)'),
+        .describe(
+          'Recipient address (EVM 0x..., Stellar G.../C..., or Solana)'
+        ),
       network: z
-        .enum(['stellar', 'stellar-testnet', 'base', 'base-sepolia'])
+        .enum([
+          'stellar',
+          'stellar-testnet',
+          'base',
+          'base-sepolia',
+          'solana',
+          'solana-devnet'
+        ])
         .describe('Payment network'),
       resource: z
         .string()
         .optional()
         .describe('URL of the resource being paid for'),
       scheme: z
-        .enum(['exact', 'upto'])
+        .enum(['exact', 'upto', 'auth-capture'])
         .default('exact')
         .describe(
-          'Payment scheme. "exact" transfers the exact amount; "upto" authorizes a maximum that the server settles against actual usage (EVM only). For "upto", pass the accept\'s extra (must include facilitatorAddress).'
+          'Payment scheme. "exact" transfers the exact amount; "upto" authorizes a maximum that the server settles against actual usage (EVM only); "auth-capture" authorizes a hold that the server captures later (EVM only). For "upto" and "auth-capture", pass the accept\'s extra exactly as received.'
         ),
       extra: z
         .record(z.unknown())
         .optional()
         .describe(
-          'Optional extra metadata from accepts[0].extra in the PAYMENT-REQUIRED header. Must be passed through exactly as received and included in the signed payload. Required for the "upto" scheme.'
+          'Optional extra metadata from accepts[0].extra in the PAYMENT-REQUIRED header. Must be passed through exactly as received and included in the signed payload. Required for the "upto" and "auth-capture" schemes, and for Solana (needs feePayer).'
         )
     },
     async ({
@@ -57,7 +67,7 @@ export function registerPay(
           content: [
             {
               type: 'text' as const,
-              text: 'No wallet configured. Set STELLAR_SECRET or EVM_PRIVATE_KEY environment variable.'
+              text: 'No wallet configured. Set STELLAR_SECRET, EVM_PRIVATE_KEY, or SOLANA_SECRET environment variable.'
             }
           ],
           isError: true
@@ -90,12 +100,24 @@ export function registerPay(
         }
       }
 
-      if (scheme === 'upto' && isStellarNetwork(net)) {
+      if (isSolanaNetwork(net) && !config.canPaySolana) {
         return {
           content: [
             {
               type: 'text' as const,
-              text: 'The upto scheme is only supported on EVM networks (base, base-sepolia).'
+              text: 'Solana key not configured. Set SOLANA_SECRET to pay on Solana.'
+            }
+          ],
+          isError: true
+        }
+      }
+
+      if (scheme !== 'exact' && !isEvmNetwork(net)) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `The ${scheme} scheme is only supported on EVM networks (base, base-sepolia).`
             }
           ],
           isError: true
@@ -108,6 +130,30 @@ export function registerPay(
             {
               type: 'text' as const,
               text: 'The upto scheme requires extra.facilitatorAddress. Pass the accept\'s "extra" object exactly as received in the PAYMENT-REQUIRED header.'
+            }
+          ],
+          isError: true
+        }
+      }
+
+      if (scheme === 'auth-capture' && !extra) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'The auth-capture scheme requires the accept\'s "extra" object (captureAuthorizer, feeRecipient, deadlines, fee bps). Pass it exactly as received in the PAYMENT-REQUIRED header.'
+            }
+          ],
+          isError: true
+        }
+      }
+
+      if (isSolanaNetwork(net) && typeof extra?.feePayer !== 'string') {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'Solana payments require extra.feePayer (the facilitator fee payer). Pass the accept\'s "extra" object exactly as received in the PAYMENT-REQUIRED header.'
             }
           ],
           isError: true
@@ -150,9 +196,9 @@ export function registerPay(
               amount: toAtomicUnits(amount, net),
               payTo: recipient,
               maxTimeoutSeconds: 300,
-              // For upto the caller's extra is mandatory (validated above);
-              // the exact-scheme EIP-712 defaults do not apply to Permit2
-              extra: scheme === 'upto' ? extra! : (extra ?? getExtra(net))
+              // For upto/auth-capture the caller's extra is mandatory
+              // (validated above); the EIP-712 defaults only fit exact
+              extra: scheme !== 'exact' ? extra! : (extra ?? getExtra(net))
             }
           ]
         }
@@ -167,7 +213,7 @@ export function registerPay(
 
         spending.record(amount, recipient, network, {
           scheme,
-          authorizedAmount: scheme === 'upto' ? amount : undefined
+          authorizedAmount: scheme !== 'exact' ? amount : undefined
         })
 
         // v1 returns X-PAYMENT, v2 returns PAYMENT-SIGNATURE
@@ -187,9 +233,12 @@ export function registerPay(
                   network,
                   resource: resource ?? null,
                   hint: `Set this as the ${headerName} header in your HTTP request.`,
-                  ...(scheme === 'upto'
+                  ...(scheme !== 'exact'
                     ? {
-                        note: 'This authorizes UP TO this amount; the server settles the actual usage. The full maximum was recorded against your budget since the settled value is unknown for manual payments.'
+                        note:
+                          scheme === 'upto'
+                            ? 'This authorizes UP TO this amount; the server settles the actual usage. The full maximum was recorded against your budget since the settled value is unknown for manual payments.'
+                            : 'This authorizes a HOLD up to this amount; the server captures the actual charge later. The full maximum was recorded against your budget.'
                       }
                     : {})
                 },
@@ -220,7 +269,9 @@ function getAssetAddress(network: PaymentNetwork): string {
     'stellar-testnet':
       'CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA',
     base: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
-    'base-sepolia': '0x036CbD53842c5426634e7929541eC2318f3dCF7e'
+    'base-sepolia': '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+    solana: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+    'solana-devnet': '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU'
   }
   return addresses[network]
 }
@@ -234,7 +285,9 @@ function getExtra(network: PaymentNetwork): Record<string, unknown> {
     base: { name: 'USD Coin', version: '2' },
     'base-sepolia': { name: 'USDC', version: '2' },
     stellar: { name: '', version: '' },
-    'stellar-testnet': { name: '', version: '' }
+    'stellar-testnet': { name: '', version: '' },
+    solana: { name: '', version: '' },
+    'solana-devnet': { name: '', version: '' }
   }
   return eip712[network]
 }

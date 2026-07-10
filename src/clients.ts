@@ -32,7 +32,9 @@ const CAIP2_NETWORKS: Record<PaymentNetwork, string> = {
   stellar: 'stellar:pubnet',
   'stellar-testnet': 'stellar:testnet',
   base: 'eip155:8453',
-  'base-sepolia': 'eip155:84532'
+  'base-sepolia': 'eip155:84532',
+  solana: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp',
+  'solana-devnet': 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1'
 }
 
 export function isStellarNetwork(network: PaymentNetwork): boolean {
@@ -41,6 +43,10 @@ export function isStellarNetwork(network: PaymentNetwork): boolean {
 
 export function isEvmNetwork(network: PaymentNetwork): boolean {
   return network === 'base' || network === 'base-sepolia'
+}
+
+export function isSolanaNetwork(network: PaymentNetwork): boolean {
+  return network === 'solana' || network === 'solana-devnet'
 }
 
 export function getCaip2Network(network: PaymentNetwork): string {
@@ -73,6 +79,24 @@ export async function createEvmSigner(
   return signer as unknown as EvmSigner
 }
 
+// Accepts both base58-encoded secrets (Phantom export) and
+// JSON byte arrays (solana-keygen id.json)
+export async function createSolanaSigner(config: AppConfig) {
+  if (!config.solanaSecret) {
+    throw new Error('No Solana key configured')
+  }
+
+  const { createKeyPairSignerFromBytes, getBase58Encoder } =
+    await import('@solana/kit')
+
+  const secret = config.solanaSecret.trim()
+  const bytes = secret.startsWith('[')
+    ? Uint8Array.from(JSON.parse(secret) as number[])
+    : new Uint8Array(getBase58Encoder().encode(secret))
+
+  return createKeyPairSignerFromBytes(bytes)
+}
+
 export async function createHttpClient(
   network: PaymentNetwork,
   config: AppConfig
@@ -91,6 +115,8 @@ export async function createHttpClient(
   if (isEvmNetwork(network) && config.evmPrivateKey) {
     const { registerExactEvmScheme } = await import('@x402/evm/exact/client')
     const { UptoEvmScheme } = await import('@x402/evm/upto/client')
+    const { AuthCaptureEvmScheme } =
+      await import('@x402/evm/auth-capture/client')
 
     const signer = await createEvmSigner(network, config)
     const caip2 = getCaip2Network(network) as `${string}:${string}`
@@ -99,6 +125,14 @@ export async function createHttpClient(
     registerExactEvmScheme(client, { signer: signer as any })
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     client.register(caip2, new UptoEvmScheme(signer as any))
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    client.register(caip2, new AuthCaptureEvmScheme(signer as any))
+  }
+
+  if (isSolanaNetwork(network) && config.solanaSecret) {
+    const { registerExactSvmScheme } = await import('@x402/svm/exact/client')
+    const signer = await createSolanaSigner(config)
+    registerExactSvmScheme(client, { signer })
   }
 
   return new x402HTTPClient(client)
@@ -118,6 +152,11 @@ export async function getWalletAddress(
     const { privateKeyToAccount } = await import('viem/accounts')
     const account = privateKeyToAccount(config.evmPrivateKey as `0x${string}`)
     return account.address
+  }
+
+  if (isSolanaNetwork(network) && config.solanaSecret) {
+    const signer = await createSolanaSigner(config)
+    return signer.address
   }
 
   throw new Error(`No key configured for network ${network}`)
@@ -178,6 +217,42 @@ export async function getUsdcBalance(
       const raw = BigInt(balance as bigint)
       const whole = raw / BigInt(10 ** decimals)
       const frac = raw % BigInt(10 ** decimals)
+      return `${whole}.${frac.toString().padStart(decimals, '0')}`
+    } catch {
+      return '0.000000'
+    }
+  }
+
+  if (isSolanaNetwork(network) && config.solanaSecret) {
+    const { createSolanaRpc, address } = await import('@solana/kit')
+    const { USDC_MAINNET_ADDRESS, USDC_DEVNET_ADDRESS } =
+      await import('@x402/svm')
+
+    const rpcUrl =
+      network === 'solana'
+        ? 'https://api.mainnet-beta.solana.com'
+        : 'https://api.devnet.solana.com'
+    const mint =
+      network === 'solana' ? USDC_MAINNET_ADDRESS : USDC_DEVNET_ADDRESS
+
+    try {
+      const signer = await createSolanaSigner(config)
+      const rpc = createSolanaRpc(rpcUrl)
+      const { value: accounts } = await rpc
+        .getTokenAccountsByOwner(
+          address(signer.address),
+          { mint: address(mint) },
+          { encoding: 'jsonParsed' }
+        )
+        .send()
+
+      let total = 0n
+      for (const acc of accounts) {
+        total += BigInt(acc.account.data.parsed.info.tokenAmount.amount)
+      }
+      const decimals = 6
+      const whole = total / BigInt(10 ** decimals)
+      const frac = total % BigInt(10 ** decimals)
       return `${whole}.${frac.toString().padStart(decimals, '0')}`
     } catch {
       return '0.000000'

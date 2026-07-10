@@ -23,12 +23,15 @@ vi.mock('../src/clients.js', () => ({
       stellar: 'stellar:pubnet',
       'stellar-testnet': 'stellar:testnet',
       base: 'eip155:8453',
-      'base-sepolia': 'eip155:84532'
+      'base-sepolia': 'eip155:84532',
+      solana: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp',
+      'solana-devnet': 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1'
     }
     return map[net]
   }),
   isStellarNetwork: vi.fn((net: string) => net.startsWith('stellar')),
-  isEvmNetwork: vi.fn((net: string) => net.startsWith('base'))
+  isEvmNetwork: vi.fn((net: string) => net.startsWith('base')),
+  isSolanaNetwork: vi.fn((net: string) => net.startsWith('solana'))
 }))
 
 vi.mock('../src/permit2.js', () => ({
@@ -42,11 +45,13 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
     stellarSecret: undefined,
     evmPrivateKey: undefined,
+    solanaSecret: undefined,
     network: 'stellar-testnet',
     budget: { maxPerCall: '1.00', maxPerDay: '20.00' },
     canPay: false,
     canPayStellar: false,
     canPayEvm: false,
+    canPaySolana: false,
     mode: 'READ_ONLY',
     reload: vi.fn(),
     ...overrides
@@ -775,6 +780,97 @@ describe('x402_fetch tool', () => {
       expect(mockEnsurePermit2).not.toHaveBeenCalled()
     })
 
+    it('pays an auth-capture accept without any on-chain approval', async () => {
+      mock402({
+        x402Version: 2,
+        error: '',
+        resource: { url: '', description: '', mimeType: '' },
+        accepts: [
+          {
+            scheme: 'auth-capture',
+            network: 'eip155:84532',
+            asset: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+            amount: '80000',
+            payTo: '0xRecipient',
+            maxTimeoutSeconds: 300,
+            extra: {
+              name: 'USDC',
+              version: '2',
+              captureAuthorizer: '0xOperator',
+              feeRecipient: '0xFee',
+              captureDeadline: 9999999999,
+              refundDeadline: 9999999999,
+              minFeeBps: 0,
+              maxFeeBps: 100
+            }
+          }
+        ]
+      })
+      mockPaidResponse('held')
+
+      mockCreatePaymentPayload.mockResolvedValue({ payload: 'signed' })
+      mockEncodePaymentSignatureHeader.mockReturnValue({
+        'PAYMENT-SIGNATURE': 'header'
+      })
+
+      const server = { tool: vi.fn() } as unknown as McpServer
+      const config = evmConfig()
+      const spending = new SpendingTracker(config.budget)
+      registerX402Fetch(server, config, spending)
+
+      const handler = extractToolHandler(server)
+      const result = (await handler({
+        url: 'https://api.example.com/hold',
+        method: 'GET'
+      })) as ToolResult
+
+      const parsed = JSON.parse(result.content[0].text)
+      expect(parsed.payment.scheme).toBe('auth-capture')
+      expect(parsed.payment.authorized).toBe('0.080000 USDC')
+      expect(mockEnsurePermit2).not.toHaveBeenCalled()
+      expect(spending.getSummary().recentPayments[0].authorizedAmount).toBe(
+        '0.080000'
+      )
+    })
+
+    it('skips auth-capture accepts on non-EVM networks', async () => {
+      mock402({
+        x402Version: 2,
+        error: '',
+        resource: { url: '', description: '', mimeType: '' },
+        accepts: [
+          {
+            scheme: 'auth-capture',
+            network: 'stellar:testnet',
+            asset: 'CBIELTK6...',
+            amount: '1000000',
+            payTo: 'GABC...',
+            maxTimeoutSeconds: 300,
+            extra: {}
+          }
+        ]
+      })
+
+      const server = { tool: vi.fn() } as unknown as McpServer
+      const config = makeConfig({
+        canPay: true,
+        canPayStellar: true,
+        stellarSecret: 'STEST...',
+        mode: 'STELLAR_ONLY'
+      })
+      const spending = new SpendingTracker(config.budget)
+      registerX402Fetch(server, config, spending)
+
+      const handler = extractToolHandler(server)
+      const result = (await handler({
+        url: 'https://api.example.com/hold',
+        method: 'GET'
+      })) as ToolResult
+
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toContain('Cannot fulfill payment')
+    })
+
     it('respects server preference order when exact comes before upto', async () => {
       mock402({
         x402Version: 2,
@@ -815,6 +911,173 @@ describe('x402_fetch tool', () => {
       expect(parsed.payment.scheme).toBe('exact')
       expect(parsed.payment.amount).toBe('0.050000 USDC')
       expect(mockEnsurePermit2).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('solana', () => {
+    it('pays an exact accept on solana when a solana key is configured', async () => {
+      mockFetch.mockResolvedValueOnce({
+        status: 402,
+        statusText: 'Payment Required',
+        headers: { get: () => null },
+        json: vi.fn().mockResolvedValue({
+          x402Version: 2,
+          error: '',
+          resource: { url: '', description: '', mimeType: '' },
+          accepts: [
+            {
+              scheme: 'exact',
+              network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1',
+              asset: '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
+              amount: '50000',
+              payTo: 'So1anaRecipient',
+              maxTimeoutSeconds: 300,
+              extra: { feePayer: 'FaciL1tatorFeePayer' }
+            }
+          ]
+        })
+      })
+      mockFetch.mockResolvedValueOnce({
+        status: 200,
+        statusText: 'OK',
+        headers: { get: () => null },
+        text: vi.fn().mockResolvedValue('paid on solana')
+      })
+
+      mockCreatePaymentPayload.mockResolvedValue({ payload: 'signed' })
+      mockEncodePaymentSignatureHeader.mockReturnValue({
+        'PAYMENT-SIGNATURE': 'header'
+      })
+
+      const server = { tool: vi.fn() } as unknown as McpServer
+      const config = makeConfig({
+        canPay: true,
+        canPaySolana: true,
+        solanaSecret: 'base58secret',
+        mode: 'SOLANA_ONLY'
+      })
+      const spending = new SpendingTracker(config.budget)
+      registerX402Fetch(server, config, spending)
+
+      const handler = extractToolHandler(server)
+      const result = (await handler({
+        url: 'https://api.example.com/solana',
+        method: 'GET'
+      })) as ToolResult
+
+      const parsed = JSON.parse(result.content[0].text)
+      expect(parsed.payment.network).toBe('solana-devnet')
+      expect(parsed.payment.amount).toBe('0.050000 USDC')
+      expect(mockEnsurePermit2).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('payment-identifier extension', () => {
+    const exactAccept = {
+      scheme: 'exact',
+      network: 'eip155:84532',
+      asset: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+      amount: '50000',
+      payTo: '0xRecipient',
+      maxTimeoutSeconds: 300,
+      extra: {}
+    }
+
+    function setupPaidFlow(body: Record<string, unknown>): {
+      config: AppConfig
+      spending: SpendingTracker
+      handler: (...args: unknown[]) => Promise<unknown>
+    } {
+      mockFetch.mockResolvedValueOnce({
+        status: 402,
+        statusText: 'Payment Required',
+        headers: { get: () => null },
+        json: vi.fn().mockResolvedValue(body)
+      })
+      mockFetch.mockResolvedValueOnce({
+        status: 200,
+        statusText: 'OK',
+        headers: { get: () => null },
+        text: vi.fn().mockResolvedValue('paid')
+      })
+      mockCreatePaymentPayload.mockResolvedValue({ payload: 'signed' })
+      mockEncodePaymentSignatureHeader.mockReturnValue({
+        'PAYMENT-SIGNATURE': 'header'
+      })
+
+      const server = { tool: vi.fn() } as unknown as McpServer
+      const config = makeConfig({
+        canPay: true,
+        canPayEvm: true,
+        evmPrivateKey: '0xabc',
+        mode: 'EVM_ONLY'
+      })
+      const spending = new SpendingTracker(config.budget)
+      registerX402Fetch(server, config, spending)
+      return { config, spending, handler: extractToolHandler(server) }
+    }
+
+    it('generates and attaches an id when the server declares the extension', async () => {
+      const { handler } = setupPaidFlow({
+        x402Version: 2,
+        error: '',
+        resource: { url: '', description: '', mimeType: '' },
+        accepts: [exactAccept],
+        extensions: { 'payment-identifier': { info: { required: false } } }
+      })
+
+      const result = (await handler({
+        url: 'https://api.example.com/paid',
+        method: 'GET'
+      })) as ToolResult
+
+      const sentPayload = mockEncodePaymentSignatureHeader.mock.calls[0][0]
+      const id = sentPayload.extensions['payment-identifier'].info.id
+      expect(id).toMatch(/^pay_[0-9a-f]{32}$/)
+
+      const parsed = JSON.parse(result.content[0].text)
+      expect(parsed.payment.paymentId).toBe(id)
+    })
+
+    it('reuses a caller-supplied paymentId even without server declaration', async () => {
+      const { handler } = setupPaidFlow({
+        x402Version: 2,
+        error: '',
+        resource: { url: '', description: '', mimeType: '' },
+        accepts: [exactAccept]
+      })
+
+      const result = (await handler({
+        url: 'https://api.example.com/paid',
+        method: 'GET',
+        paymentId: 'pay_retry_of_previous_call'
+      })) as ToolResult
+
+      const sentPayload = mockEncodePaymentSignatureHeader.mock.calls[0][0]
+      expect(sentPayload.extensions['payment-identifier'].info.id).toBe(
+        'pay_retry_of_previous_call'
+      )
+      const parsed = JSON.parse(result.content[0].text)
+      expect(parsed.payment.paymentId).toBe('pay_retry_of_previous_call')
+    })
+
+    it('attaches nothing when the server does not declare the extension', async () => {
+      const { handler } = setupPaidFlow({
+        x402Version: 2,
+        error: '',
+        resource: { url: '', description: '', mimeType: '' },
+        accepts: [exactAccept]
+      })
+
+      const result = (await handler({
+        url: 'https://api.example.com/paid',
+        method: 'GET'
+      })) as ToolResult
+
+      const sentPayload = mockEncodePaymentSignatureHeader.mock.calls[0][0]
+      expect(sentPayload.extensions).toBeUndefined()
+      const parsed = JSON.parse(result.content[0].text)
+      expect(parsed.payment.paymentId).toBeNull()
     })
   })
 })

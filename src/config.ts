@@ -19,6 +19,8 @@ function buildState(): Omit<AppConfig, 'reload'> {
     process.env.STELLAR_SECRET ?? wallet?.stellarSecret ?? undefined
   const evmPrivateKey =
     process.env.EVM_PRIVATE_KEY ?? wallet?.evmPrivateKey ?? undefined
+  const solanaSecret =
+    process.env.SOLANA_SECRET ?? wallet?.solanaSecret ?? undefined
   const network = (process.env.NETWORK ??
     wallet?.network ??
     'stellar') as PaymentNetwork
@@ -28,21 +30,26 @@ function buildState(): Omit<AppConfig, 'reload'> {
 
   const canPayStellar = !!stellarSecret
   const canPayEvm = !!evmPrivateKey
-  const canPay = canPayStellar || canPayEvm
+  const canPaySolana = !!solanaSecret
+  const enabled = [canPayStellar, canPayEvm, canPaySolana].filter(Boolean)
+  const canPay = enabled.length > 0
 
   let mode: AppConfig['mode'] = 'READ_ONLY'
-  if (canPayStellar && canPayEvm) mode = 'FULL'
+  if (enabled.length > 1) mode = 'FULL'
   else if (canPayStellar) mode = 'STELLAR_ONLY'
   else if (canPayEvm) mode = 'EVM_ONLY'
+  else if (canPaySolana) mode = 'SOLANA_ONLY'
 
   return {
     stellarSecret,
     evmPrivateKey,
+    solanaSecret,
     network,
     budget: { maxPerCall, maxPerDay },
     canPay,
     canPayStellar,
     canPayEvm,
+    canPaySolana,
     mode
   }
 }

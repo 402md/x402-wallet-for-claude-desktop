@@ -2,7 +2,12 @@ import { z } from 'zod'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { AppConfig, PaymentNetwork } from '@/types.js'
 import type { SpendingTracker } from '@/spending.js'
-import { createHttpClient, isStellarNetwork, isEvmNetwork } from '@/clients.js'
+import {
+  createHttpClient,
+  isStellarNetwork,
+  isEvmNetwork,
+  isSolanaNetwork
+} from '@/clients.js'
 import { ensurePermit2Allowance } from '@/permit2.js'
 import type { EnsurePermit2Result } from '@/permit2.js'
 
@@ -28,7 +33,9 @@ const CAIP2_TO_NETWORK: Record<string, PaymentNetwork> = {
   'stellar:pubnet': 'stellar',
   'stellar:testnet': 'stellar-testnet',
   'eip155:8453': 'base',
-  'eip155:84532': 'base-sepolia'
+  'eip155:84532': 'base-sepolia',
+  'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp': 'solana',
+  'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1': 'solana-devnet'
 }
 
 function caip2ToNetwork(caip2: string): PaymentNetwork | undefined {
@@ -45,9 +52,18 @@ function atomicToUsdc(atomicAmount: string, network: PaymentNetwork): string {
 
 function isSchemeSupported(scheme: string, network: PaymentNetwork): boolean {
   if (scheme === 'exact') return true
-  // upto settles through Permit2, which only exists on EVM networks
-  if (scheme === 'upto') return isEvmNetwork(network)
+  // upto (Permit2) and auth-capture (escrow) only exist on EVM networks
+  if (scheme === 'upto' || scheme === 'auth-capture') {
+    return isEvmNetwork(network)
+  }
   return false
+}
+
+const PAYMENT_ID_EXTENSION = 'payment-identifier'
+const PAYMENT_ID_PATTERN = /^[a-zA-Z0-9_-]{16,128}$/
+
+function generatePaymentId(): string {
+  return `pay_${crypto.randomUUID().replaceAll('-', '')}`
 }
 
 const GASLESS_EXTENSION_KEYS = [
@@ -78,15 +94,22 @@ export function registerX402Fetch(
         .record(z.string())
         .optional()
         .describe('Optional HTTP headers as key-value pairs'),
-      body: z.string().optional().describe('Optional request body')
+      body: z.string().optional().describe('Optional request body'),
+      paymentId: z
+        .string()
+        .regex(PAYMENT_ID_PATTERN)
+        .optional()
+        .describe(
+          'Optional payment identifier (16-128 chars: alphanumerics, hyphens, underscores). Reuse the same id when retrying a payment so the server can deduplicate. Auto-generated when the server supports the payment-identifier extension.'
+        )
     },
-    async ({ url, method, headers, body }) => {
+    async ({ url, method, headers, body, paymentId }) => {
       if (!config.canPay) {
         return {
           content: [
             {
               type: 'text' as const,
-              text: 'No wallet configured. Set STELLAR_SECRET or EVM_PRIVATE_KEY environment variable.'
+              text: 'No wallet configured. Set STELLAR_SECRET, EVM_PRIVATE_KEY, or SOLANA_SECRET environment variable.'
             }
           ],
           isError: true
@@ -163,6 +186,7 @@ export function registerX402Fetch(
           if (!isSchemeSupported(a.scheme, net)) return false
           if (isStellarNetwork(net) && config.canPayStellar) return true
           if (isEvmNetwork(net) && config.canPayEvm) return true
+          if (isSolanaNetwork(net) && config.canPaySolana) return true
           return false
         })
 
@@ -222,6 +246,21 @@ export function registerX402Fetch(
           ...paymentRequired,
           accepts: [accept]
         })
+
+        // Attach a payment id when the server supports the extension
+        // (or the caller supplied one) so retries can be deduplicated
+        const serverSupportsPaymentId =
+          !!paymentRequired.extensions?.[PAYMENT_ID_EXTENSION]
+        const attachedPaymentId =
+          paymentId ??
+          (serverSupportsPaymentId ? generatePaymentId() : undefined)
+        if (attachedPaymentId) {
+          payload.extensions = {
+            ...(payload.extensions ?? {}),
+            [PAYMENT_ID_EXTENSION]: { info: { id: attachedPaymentId } }
+          }
+        }
+
         const signatureHeaders =
           httpClient.encodePaymentSignatureHeader(payload)
 
@@ -267,7 +306,7 @@ export function registerX402Fetch(
         // falls back to the authorized maximum, which never undercounts)
         spending.record(settledUsdc, accept.payTo, network, {
           scheme: accept.scheme,
-          authorizedAmount: accept.scheme === 'upto' ? usdcAmount : undefined
+          authorizedAmount: accept.scheme !== 'exact' ? usdcAmount : undefined
         })
 
         return {
@@ -290,7 +329,8 @@ export function registerX402Fetch(
                     recipient: accept.payTo,
                     network,
                     transaction: settle?.transaction ?? null,
-                    permit2Approval: permit2?.approvalTxHash ?? null
+                    permit2Approval: permit2?.approvalTxHash ?? null,
+                    paymentId: attachedPaymentId ?? null
                   }
                 },
                 null,

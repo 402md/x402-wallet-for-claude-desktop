@@ -9,6 +9,7 @@ describe('loadConfig', () => {
   beforeEach(() => {
     delete process.env.STELLAR_SECRET
     delete process.env.EVM_PRIVATE_KEY
+    delete process.env.SOLANA_SECRET
     delete process.env.NETWORK
     delete process.env.MAX_PER_CALL
     delete process.env.MAX_PER_DAY
@@ -47,6 +48,25 @@ describe('loadConfig', () => {
     expect(config.mode).toBe('FULL')
     expect(config.canPay).toBe(true)
     expect(config.canPayStellar).toBe(true)
+    expect(config.canPayEvm).toBe(true)
+  })
+
+  it('returns SOLANA_ONLY when only solana key is set', () => {
+    process.env.SOLANA_SECRET = 'base58secret'
+    const config = loadConfig()
+    expect(config.mode).toBe('SOLANA_ONLY')
+    expect(config.canPay).toBe(true)
+    expect(config.canPaySolana).toBe(true)
+    expect(config.canPayStellar).toBe(false)
+    expect(config.canPayEvm).toBe(false)
+  })
+
+  it('returns FULL when solana and evm keys are set', () => {
+    process.env.SOLANA_SECRET = 'base58secret'
+    process.env.EVM_PRIVATE_KEY = '0xabc123'
+    const config = loadConfig()
+    expect(config.mode).toBe('FULL')
+    expect(config.canPaySolana).toBe(true)
     expect(config.canPayEvm).toBe(true)
   })
 

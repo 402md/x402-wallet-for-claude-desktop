@@ -24,23 +24,28 @@ vi.mock('../src/clients.js', () => ({
       stellar: 'stellar:pubnet',
       'stellar-testnet': 'stellar:testnet',
       base: 'eip155:8453',
-      'base-sepolia': 'eip155:84532'
+      'base-sepolia': 'eip155:84532',
+      solana: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp',
+      'solana-devnet': 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1'
     }
     return map[net]
   }),
   isStellarNetwork: vi.fn((net: string) => net.startsWith('stellar')),
-  isEvmNetwork: vi.fn((net: string) => net.startsWith('base'))
+  isEvmNetwork: vi.fn((net: string) => net.startsWith('base')),
+  isSolanaNetwork: vi.fn((net: string) => net.startsWith('solana'))
 }))
 
 function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
     stellarSecret: undefined,
     evmPrivateKey: undefined,
+    solanaSecret: undefined,
     network: 'stellar-testnet',
     budget: { maxPerCall: '1.00', maxPerDay: '20.00' },
     canPay: false,
     canPayStellar: false,
     canPayEvm: false,
+    canPaySolana: false,
     mode: 'READ_ONLY',
     reload: vi.fn(),
     ...overrides
@@ -467,6 +472,198 @@ describe('pay tool', () => {
       expect(result.isError).toBe(true)
       expect(result.content[0].text).toContain('no ETH')
       expect(parseFloat(spending.getSummary().spentSession)).toBe(0)
+    })
+  })
+
+  describe('auth-capture scheme', () => {
+    const authCaptureExtra = {
+      name: 'USDC',
+      version: '2',
+      captureAuthorizer: '0xOperator',
+      feeRecipient: '0xFee',
+      captureDeadline: 9999999999,
+      refundDeadline: 9999999999,
+      minFeeBps: 0,
+      maxFeeBps: 100
+    }
+
+    function evmConfig(): AppConfig {
+      return makeConfig({
+        canPay: true,
+        canPayEvm: true,
+        evmPrivateKey: '0xabc',
+        mode: 'EVM_ONLY'
+      })
+    }
+
+    it('signs an auth-capture payment without any on-chain approval', async () => {
+      mockCreatePaymentPayload.mockResolvedValue({
+        x402Version: 2,
+        payload: 'data'
+      })
+      mockEncodePaymentSignatureHeader.mockReturnValue({
+        'PAYMENT-SIGNATURE': 'header-value'
+      })
+
+      const server = { tool: vi.fn() } as unknown as McpServer
+      const config = evmConfig()
+      const spending = new SpendingTracker(config.budget)
+      registerPay(server, config, spending)
+
+      const handler = extractToolHandler(server)
+      const result = (await handler({
+        amount: '0.05',
+        recipient: '0xRecipient',
+        network: 'base-sepolia',
+        scheme: 'auth-capture',
+        extra: authCaptureExtra
+      })) as { content: { text: string }[] }
+
+      const parsed = JSON.parse(result.content[0].text)
+      expect(parsed.scheme).toBe('auth-capture')
+      expect(parsed.note).toContain('HOLD')
+
+      const paymentRequired = mockCreatePaymentPayload.mock.calls[0][0]
+      expect(paymentRequired.accepts[0].scheme).toBe('auth-capture')
+      expect(paymentRequired.accepts[0].extra).toEqual(authCaptureExtra)
+      expect(mockEnsurePermit2).not.toHaveBeenCalled()
+
+      const summary = spending.getSummary()
+      expect(summary.recentPayments[0].scheme).toBe('auth-capture')
+      expect(summary.recentPayments[0].authorizedAmount).toBe('0.05')
+    })
+
+    it('rejects auth-capture without the extra object', async () => {
+      const server = { tool: vi.fn() } as unknown as McpServer
+      const config = evmConfig()
+      const spending = new SpendingTracker(config.budget)
+      registerPay(server, config, spending)
+
+      const handler = extractToolHandler(server)
+      const result = (await handler({
+        amount: '0.05',
+        recipient: '0xRecipient',
+        network: 'base-sepolia',
+        scheme: 'auth-capture'
+      })) as { isError: boolean; content: { text: string }[] }
+
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toContain('extra')
+      expect(mockCreatePaymentPayload).not.toHaveBeenCalled()
+    })
+
+    it('rejects auth-capture on Stellar networks', async () => {
+      const server = { tool: vi.fn() } as unknown as McpServer
+      const config = makeConfig({
+        canPay: true,
+        canPayStellar: true,
+        stellarSecret: 'STEST...',
+        mode: 'STELLAR_ONLY'
+      })
+      const spending = new SpendingTracker(config.budget)
+      registerPay(server, config, spending)
+
+      const handler = extractToolHandler(server)
+      const result = (await handler({
+        amount: '0.05',
+        recipient: 'GABC...',
+        network: 'stellar-testnet',
+        scheme: 'auth-capture',
+        extra: authCaptureExtra
+      })) as { isError: boolean; content: { text: string }[] }
+
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toContain('EVM networks')
+    })
+  })
+
+  describe('solana', () => {
+    function solanaConfig(): AppConfig {
+      return makeConfig({
+        canPay: true,
+        canPaySolana: true,
+        solanaSecret: 'base58secret',
+        mode: 'SOLANA_ONLY'
+      })
+    }
+
+    it('signs a solana payment when extra.feePayer is provided', async () => {
+      mockCreatePaymentPayload.mockResolvedValue({
+        x402Version: 2,
+        payload: 'data'
+      })
+      mockEncodePaymentSignatureHeader.mockReturnValue({
+        'PAYMENT-SIGNATURE': 'header-value'
+      })
+
+      const server = { tool: vi.fn() } as unknown as McpServer
+      const config = solanaConfig()
+      const spending = new SpendingTracker(config.budget)
+      registerPay(server, config, spending)
+
+      const handler = extractToolHandler(server)
+      const result = (await handler({
+        amount: '0.05',
+        recipient: 'So1anaRecipient',
+        network: 'solana-devnet',
+        extra: { feePayer: 'FaciL1tatorFeePayer' }
+      })) as { content: { text: string }[] }
+
+      const parsed = JSON.parse(result.content[0].text)
+      expect(parsed.paymentHeader).toBe('header-value')
+      expect(parsed.network).toBe('solana-devnet')
+
+      const paymentRequired = mockCreatePaymentPayload.mock.calls[0][0]
+      expect(paymentRequired.accepts[0].network).toBe(
+        'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1'
+      )
+      expect(paymentRequired.accepts[0].asset).toBe(
+        '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU'
+      )
+      expect(paymentRequired.accepts[0].extra).toEqual({
+        feePayer: 'FaciL1tatorFeePayer'
+      })
+    })
+
+    it('rejects solana payments without extra.feePayer', async () => {
+      const server = { tool: vi.fn() } as unknown as McpServer
+      const config = solanaConfig()
+      const spending = new SpendingTracker(config.budget)
+      registerPay(server, config, spending)
+
+      const handler = extractToolHandler(server)
+      const result = (await handler({
+        amount: '0.05',
+        recipient: 'So1anaRecipient',
+        network: 'solana-devnet'
+      })) as { isError: boolean; content: { text: string }[] }
+
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toContain('feePayer')
+      expect(mockCreatePaymentPayload).not.toHaveBeenCalled()
+    })
+
+    it('returns error when solana key is not configured', async () => {
+      const server = { tool: vi.fn() } as unknown as McpServer
+      const config = makeConfig({
+        canPay: true,
+        canPayEvm: true,
+        evmPrivateKey: '0xabc',
+        mode: 'EVM_ONLY'
+      })
+      const spending = new SpendingTracker(config.budget)
+      registerPay(server, config, spending)
+
+      const handler = extractToolHandler(server)
+      const result = (await handler({
+        amount: '0.05',
+        recipient: 'So1anaRecipient',
+        network: 'solana-devnet',
+        extra: { feePayer: 'FaciL1tatorFeePayer' }
+      })) as { isError: boolean; content: { text: string }[] }
+
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toContain('Solana key not configured')
     })
   })
 })
