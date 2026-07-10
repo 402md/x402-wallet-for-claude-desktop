@@ -1,5 +1,32 @@
 import { x402Client, x402HTTPClient } from '@x402/core/client'
+import type { Account, Chain } from 'viem'
 import type { PaymentNetwork, AppConfig } from '@/types.js'
+
+// Minimal structural view of the viem wallet client (extended with
+// publicActions) — the full inferred type is too complex for tsc to
+// serialize, and the x402 SDK takes the signer as `any` regardless.
+export interface EvmSigner {
+  address: `0x${string}`
+  chain: Chain | undefined
+  account: Account | undefined
+  readContract(args: {
+    address: `0x${string}`
+    abi: readonly unknown[]
+    functionName: string
+    args?: readonly unknown[]
+  }): Promise<unknown>
+  getBalance(args: { address: `0x${string}` }): Promise<bigint>
+  sendTransaction(args: {
+    to: `0x${string}`
+    data?: `0x${string}`
+    chain: Chain | undefined
+    account: Account
+  }): Promise<`0x${string}`>
+  waitForTransactionReceipt(args: {
+    hash: `0x${string}`
+    timeout?: number
+  }): Promise<{ status: 'success' | 'reverted' }>
+}
 
 const CAIP2_NETWORKS: Record<PaymentNetwork, string> = {
   stellar: 'stellar:pubnet',
@@ -20,6 +47,32 @@ export function getCaip2Network(network: PaymentNetwork): string {
   return CAIP2_NETWORKS[network]
 }
 
+export async function createEvmSigner(
+  network: PaymentNetwork,
+  config: AppConfig
+): Promise<EvmSigner> {
+  if (!config.evmPrivateKey) {
+    throw new Error(`No EVM key configured for network ${network}`)
+  }
+
+  const { privateKeyToAccount } = await import('viem/accounts')
+  const { createWalletClient, http, publicActions } = await import('viem')
+  const { baseSepolia, base } = await import('viem/chains')
+
+  const chain = network === 'base-sepolia' ? baseSepolia : base
+  const account = privateKeyToAccount(config.evmPrivateKey as `0x${string}`)
+  const walletClient = createWalletClient({
+    account,
+    chain,
+    transport: http()
+  }).extend(publicActions)
+
+  // The SDK expects signer.address at the top level,
+  // but viem stores it at walletClient.account.address
+  const signer = Object.assign(walletClient, { address: account.address })
+  return signer as unknown as EvmSigner
+}
+
 export async function createHttpClient(
   network: PaymentNetwork,
   config: AppConfig
@@ -37,24 +90,15 @@ export async function createHttpClient(
 
   if (isEvmNetwork(network) && config.evmPrivateKey) {
     const { registerExactEvmScheme } = await import('@x402/evm/exact/client')
-    const { privateKeyToAccount } = await import('viem/accounts')
-    const { createWalletClient, http, publicActions } = await import('viem')
-    const { baseSepolia, base } = await import('viem/chains')
+    const { UptoEvmScheme } = await import('@x402/evm/upto/client')
 
-    const chain = network === 'base-sepolia' ? baseSepolia : base
-    const account = privateKeyToAccount(config.evmPrivateKey as `0x${string}`)
-    const walletClient = createWalletClient({
-      account,
-      chain,
-      transport: http()
-    }).extend(publicActions)
-
-    // The SDK expects signer.address at the top level,
-    // but viem stores it at walletClient.account.address
-    const signer = Object.assign(walletClient, { address: account.address })
+    const signer = await createEvmSigner(network, config)
+    const caip2 = getCaip2Network(network) as `${string}:${string}`
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     registerExactEvmScheme(client, { signer: signer as any })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    client.register(caip2, new UptoEvmScheme(signer as any))
   }
 
   return new x402HTTPClient(client)

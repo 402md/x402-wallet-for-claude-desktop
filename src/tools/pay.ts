@@ -8,6 +8,7 @@ import {
   isStellarNetwork,
   isEvmNetwork
 } from '@/clients.js'
+import { ensurePermit2Allowance } from '@/permit2.js'
 import type { PaymentNetwork } from '@/types.js'
 
 export function registerPay(
@@ -30,14 +31,27 @@ export function registerPay(
         .string()
         .optional()
         .describe('URL of the resource being paid for'),
+      scheme: z
+        .enum(['exact', 'upto'])
+        .default('exact')
+        .describe(
+          'Payment scheme. "exact" transfers the exact amount; "upto" authorizes a maximum that the server settles against actual usage (EVM only). For "upto", pass the accept\'s extra (must include facilitatorAddress).'
+        ),
       extra: z
         .record(z.unknown())
         .optional()
         .describe(
-          'Optional extra metadata from accepts[0].extra in the PAYMENT-REQUIRED header. Must be passed through exactly as received and included in the signed payload.'
+          'Optional extra metadata from accepts[0].extra in the PAYMENT-REQUIRED header. Must be passed through exactly as received and included in the signed payload. Required for the "upto" scheme.'
         )
     },
-    async ({ amount, recipient, network, resource, extra }) => {
+    async ({
+      amount,
+      recipient,
+      network,
+      resource,
+      scheme = 'exact',
+      extra
+    }) => {
       if (!config.canPay) {
         return {
           content: [
@@ -76,8 +90,45 @@ export function registerPay(
         }
       }
 
+      if (scheme === 'upto' && isStellarNetwork(net)) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'The upto scheme is only supported on EVM networks (base, base-sepolia).'
+            }
+          ],
+          isError: true
+        }
+      }
+
+      if (scheme === 'upto' && typeof extra?.facilitatorAddress !== 'string') {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'The upto scheme requires extra.facilitatorAddress. Pass the accept\'s "extra" object exactly as received in the PAYMENT-REQUIRED header.'
+            }
+          ],
+          isError: true
+        }
+      }
+
       try {
         spending.check(amount)
+
+        // upto settles via Permit2 — make sure the one-time USDC approval
+        // exists. The manual flow cannot see the server's extensions, so
+        // never assume gasless sponsorship here.
+        if (scheme === 'upto') {
+          await ensurePermit2Allowance({
+            network: net,
+            config,
+            asset: getAssetAddress(net) as `0x${string}`,
+            requiredAmount: BigInt(toAtomicUnits(amount, net)),
+            gaslessDeclared: false
+          })
+        }
 
         const httpClient = await createHttpClient(net, config)
         const caip2 = getCaip2Network(net) as `${string}:${string}`
@@ -93,13 +144,15 @@ export function registerPay(
           },
           accepts: [
             {
-              scheme: 'exact',
+              scheme,
               network: caip2,
               asset: getAssetAddress(net),
               amount: toAtomicUnits(amount, net),
               payTo: recipient,
               maxTimeoutSeconds: 300,
-              extra: extra ?? getExtra(net)
+              // For upto the caller's extra is mandatory (validated above);
+              // the exact-scheme EIP-712 defaults do not apply to Permit2
+              extra: scheme === 'upto' ? extra! : (extra ?? getExtra(net))
             }
           ]
         }
@@ -112,7 +165,10 @@ export function registerPay(
           throw new Error('Failed to generate payment header')
         }
 
-        spending.record(amount, recipient, network)
+        spending.record(amount, recipient, network, {
+          scheme,
+          authorizedAmount: scheme === 'upto' ? amount : undefined
+        })
 
         // v1 returns X-PAYMENT, v2 returns PAYMENT-SIGNATURE
         const [[headerName, headerValue]] = Object.entries(signatureHeaders)
@@ -125,11 +181,17 @@ export function registerPay(
                 {
                   paymentHeader: headerValue,
                   headerName,
+                  scheme,
                   amount: `${amount} USDC`,
                   recipient,
                   network,
                   resource: resource ?? null,
-                  hint: `Set this as the ${headerName} header in your HTTP request.`
+                  hint: `Set this as the ${headerName} header in your HTTP request.`,
+                  ...(scheme === 'upto'
+                    ? {
+                        note: 'This authorizes UP TO this amount; the server settles the actual usage. The full maximum was recorded against your budget since the settled value is unknown for manual payments.'
+                      }
+                    : {})
                 },
                 null,
                 2

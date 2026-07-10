@@ -6,13 +6,17 @@ import { registerX402Fetch } from '../src/tools/x402-fetch.js'
 
 const mockCreatePaymentPayload = vi.fn()
 const mockEncodePaymentSignatureHeader = vi.fn()
+const mockGetPaymentSettleResponse = vi.fn()
+const mockEnsurePermit2 = vi.fn()
 
 vi.mock('../src/clients.js', () => ({
   createHttpClient: vi.fn().mockResolvedValue({
     createPaymentPayload: (...args: unknown[]) =>
       mockCreatePaymentPayload(...args),
     encodePaymentSignatureHeader: (...args: unknown[]) =>
-      mockEncodePaymentSignatureHeader(...args)
+      mockEncodePaymentSignatureHeader(...args),
+    getPaymentSettleResponse: (...args: unknown[]) =>
+      mockGetPaymentSettleResponse(...args)
   }),
   getCaip2Network: vi.fn((net: string) => {
     const map: Record<string, string> = {
@@ -25,6 +29,10 @@ vi.mock('../src/clients.js', () => ({
   }),
   isStellarNetwork: vi.fn((net: string) => net.startsWith('stellar')),
   isEvmNetwork: vi.fn((net: string) => net.startsWith('base'))
+}))
+
+vi.mock('../src/permit2.js', () => ({
+  ensurePermit2Allowance: (...args: unknown[]) => mockEnsurePermit2(...args)
 }))
 
 const mockFetch = vi.fn()
@@ -61,6 +69,11 @@ type ToolResult = {
 describe('x402_fetch tool', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    // No settlement header by default; tests that need one override this
+    mockGetPaymentSettleResponse.mockImplementation(() => {
+      throw new Error('no settlement header')
+    })
+    mockEnsurePermit2.mockResolvedValue({ status: 'sufficient' })
   })
 
   it('registers the tool with correct name', () => {
@@ -488,5 +501,320 @@ describe('x402_fetch tool', () => {
 
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toContain('Network error')
+  })
+
+  describe('upto scheme', () => {
+    const uptoAccept = {
+      scheme: 'upto',
+      network: 'eip155:84532',
+      asset: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+      amount: '100000', // 0.10 USDC authorized maximum
+      payTo: '0xRecipient',
+      maxTimeoutSeconds: 300,
+      extra: { facilitatorAddress: '0xFacilitator' }
+    }
+
+    function evmConfig(overrides: Partial<AppConfig> = {}): AppConfig {
+      return makeConfig({
+        canPay: true,
+        canPayEvm: true,
+        evmPrivateKey: '0xabc',
+        mode: 'EVM_ONLY',
+        ...overrides
+      })
+    }
+
+    function mock402(body: Record<string, unknown>): void {
+      mockFetch.mockResolvedValueOnce({
+        status: 402,
+        statusText: 'Payment Required',
+        headers: { get: () => null },
+        json: vi.fn().mockResolvedValue(body)
+      })
+    }
+
+    function mockPaidResponse(text = 'metered content'): void {
+      mockFetch.mockResolvedValueOnce({
+        status: 200,
+        statusText: 'OK',
+        headers: { get: () => null },
+        text: vi.fn().mockResolvedValue(text)
+      })
+    }
+
+    it('pays an upto accept and records the settled amount', async () => {
+      mock402({
+        x402Version: 2,
+        error: '',
+        resource: { url: '', description: '', mimeType: '' },
+        accepts: [uptoAccept]
+      })
+      mockPaidResponse()
+
+      mockCreatePaymentPayload.mockResolvedValue({ payload: 'signed' })
+      mockEncodePaymentSignatureHeader.mockReturnValue({
+        'PAYMENT-SIGNATURE': 'header'
+      })
+      mockGetPaymentSettleResponse.mockReturnValue({
+        success: true,
+        transaction: '0xSettleTx',
+        network: 'eip155:84532',
+        amount: '31500' // server settled 0.0315 of the 0.10 maximum
+      })
+
+      const server = { tool: vi.fn() } as unknown as McpServer
+      const config = evmConfig()
+      const spending = new SpendingTracker(config.budget)
+      registerX402Fetch(server, config, spending)
+
+      const handler = extractToolHandler(server)
+      const result = (await handler({
+        url: 'https://api.example.com/metered',
+        method: 'GET'
+      })) as ToolResult
+
+      const parsed = JSON.parse(result.content[0].text)
+      expect(parsed.payment.scheme).toBe('upto')
+      expect(parsed.payment.authorized).toBe('0.100000 USDC')
+      expect(parsed.payment.settled).toBe('0.031500 USDC')
+      expect(parsed.payment.amount).toBe('0.031500 USDC')
+      expect(parsed.payment.transaction).toBe('0xSettleTx')
+
+      // budget records the settled amount, not the authorized maximum
+      const summary = spending.getSummary()
+      expect(parseFloat(summary.spentSession)).toBeCloseTo(0.0315)
+      expect(summary.recentPayments[0].scheme).toBe('upto')
+      expect(summary.recentPayments[0].authorizedAmount).toBe('0.100000')
+
+      // SDK is given only the accept we validated against the budget
+      const signedPaymentRequired = mockCreatePaymentPayload.mock.calls[0][0]
+      expect(signedPaymentRequired.accepts).toHaveLength(1)
+      expect(signedPaymentRequired.accepts[0].scheme).toBe('upto')
+
+      expect(mockEnsurePermit2).toHaveBeenCalledWith(
+        expect.objectContaining({
+          requiredAmount: 100000n,
+          gaslessDeclared: false
+        })
+      )
+    })
+
+    it('errors when the upto accept lacks facilitatorAddress', async () => {
+      mock402({
+        x402Version: 2,
+        error: '',
+        resource: { url: '', description: '', mimeType: '' },
+        accepts: [{ ...uptoAccept, extra: {} }]
+      })
+
+      const server = { tool: vi.fn() } as unknown as McpServer
+      const config = evmConfig()
+      const spending = new SpendingTracker(config.budget)
+      registerX402Fetch(server, config, spending)
+
+      const handler = extractToolHandler(server)
+      const result = (await handler({
+        url: 'https://api.example.com/metered',
+        method: 'GET'
+      })) as ToolResult
+
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toContain('facilitatorAddress')
+      expect(mockCreatePaymentPayload).not.toHaveBeenCalled()
+      expect(parseFloat(spending.getSummary().spentSession)).toBe(0)
+    })
+
+    it('fails without spending when the Permit2 approval cannot be made', async () => {
+      mock402({
+        x402Version: 2,
+        error: '',
+        resource: { url: '', description: '', mimeType: '' },
+        accepts: [uptoAccept]
+      })
+      mockEnsurePermit2.mockRejectedValue(
+        new Error('wallet has no ETH on base-sepolia to pay for gas')
+      )
+
+      const server = { tool: vi.fn() } as unknown as McpServer
+      const config = evmConfig()
+      const spending = new SpendingTracker(config.budget)
+      registerX402Fetch(server, config, spending)
+
+      const handler = extractToolHandler(server)
+      const result = (await handler({
+        url: 'https://api.example.com/metered',
+        method: 'GET'
+      })) as ToolResult
+
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toContain('no ETH')
+      expect(mockCreatePaymentPayload).not.toHaveBeenCalled()
+      expect(parseFloat(spending.getSummary().spentSession)).toBe(0)
+    })
+
+    it('reports the Permit2 approval tx and falls back to the maximum without a settle header', async () => {
+      mock402({
+        x402Version: 2,
+        error: '',
+        resource: { url: '', description: '', mimeType: '' },
+        accepts: [uptoAccept]
+      })
+      mockPaidResponse()
+
+      mockEnsurePermit2.mockResolvedValue({
+        status: 'approved',
+        approvalTxHash: '0xApprovalTx'
+      })
+      mockCreatePaymentPayload.mockResolvedValue({ payload: 'signed' })
+      mockEncodePaymentSignatureHeader.mockReturnValue({
+        'PAYMENT-SIGNATURE': 'header'
+      })
+
+      const server = { tool: vi.fn() } as unknown as McpServer
+      const config = evmConfig()
+      const spending = new SpendingTracker(config.budget)
+      registerX402Fetch(server, config, spending)
+
+      const handler = extractToolHandler(server)
+      const result = (await handler({
+        url: 'https://api.example.com/metered',
+        method: 'GET'
+      })) as ToolResult
+
+      const parsed = JSON.parse(result.content[0].text)
+      expect(parsed.payment.permit2Approval).toBe('0xApprovalTx')
+      expect(parsed.payment.settled).toBeNull()
+      // no settle info → conservatively record the authorized maximum
+      expect(parsed.payment.amount).toBe('0.100000 USDC')
+      expect(parseFloat(spending.getSummary().spentSession)).toBeCloseTo(0.1)
+    })
+
+    it('passes gaslessDeclared when the server declares a gas-sponsoring extension', async () => {
+      mock402({
+        x402Version: 2,
+        error: '',
+        resource: { url: '', description: '', mimeType: '' },
+        accepts: [uptoAccept],
+        extensions: { eip2612GasSponsoring: {} }
+      })
+      mockPaidResponse()
+
+      mockEnsurePermit2.mockResolvedValue({ status: 'skipped-gasless' })
+      mockCreatePaymentPayload.mockResolvedValue({ payload: 'signed' })
+      mockEncodePaymentSignatureHeader.mockReturnValue({
+        'PAYMENT-SIGNATURE': 'header'
+      })
+
+      const server = { tool: vi.fn() } as unknown as McpServer
+      const config = evmConfig()
+      const spending = new SpendingTracker(config.budget)
+      registerX402Fetch(server, config, spending)
+
+      const handler = extractToolHandler(server)
+      await handler({
+        url: 'https://api.example.com/metered',
+        method: 'GET'
+      })
+
+      expect(mockEnsurePermit2).toHaveBeenCalledWith(
+        expect.objectContaining({ gaslessDeclared: true })
+      )
+    })
+
+    it('skips upto accepts on non-EVM networks', async () => {
+      mock402({
+        x402Version: 2,
+        error: '',
+        resource: { url: '', description: '', mimeType: '' },
+        accepts: [
+          {
+            scheme: 'upto',
+            network: 'stellar:testnet',
+            asset: 'CBIELTK6...',
+            amount: '1000000',
+            payTo: 'GABC...',
+            maxTimeoutSeconds: 300,
+            extra: { facilitatorAddress: 'GFAC...' }
+          },
+          {
+            scheme: 'exact',
+            network: 'eip155:84532',
+            asset: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+            amount: '50000',
+            payTo: '0xRecipient',
+            maxTimeoutSeconds: 300,
+            extra: {}
+          }
+        ]
+      })
+      mockPaidResponse('paid')
+
+      mockCreatePaymentPayload.mockResolvedValue({ payload: 'signed' })
+      mockEncodePaymentSignatureHeader.mockReturnValue({
+        'PAYMENT-SIGNATURE': 'header'
+      })
+
+      const server = { tool: vi.fn() } as unknown as McpServer
+      const config = evmConfig({
+        canPayStellar: true,
+        stellarSecret: 'STEST...',
+        mode: 'FULL'
+      })
+      const spending = new SpendingTracker(config.budget)
+      registerX402Fetch(server, config, spending)
+
+      const handler = extractToolHandler(server)
+      const result = (await handler({
+        url: 'https://api.example.com/metered',
+        method: 'GET'
+      })) as ToolResult
+
+      const parsed = JSON.parse(result.content[0].text)
+      expect(parsed.payment.scheme).toBe('exact')
+      expect(parsed.payment.network).toBe('base-sepolia')
+      expect(mockEnsurePermit2).not.toHaveBeenCalled()
+    })
+
+    it('respects server preference order when exact comes before upto', async () => {
+      mock402({
+        x402Version: 2,
+        error: '',
+        resource: { url: '', description: '', mimeType: '' },
+        accepts: [
+          {
+            scheme: 'exact',
+            network: 'eip155:84532',
+            asset: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+            amount: '50000',
+            payTo: '0xRecipient',
+            maxTimeoutSeconds: 300,
+            extra: {}
+          },
+          uptoAccept
+        ]
+      })
+      mockPaidResponse('paid')
+
+      mockCreatePaymentPayload.mockResolvedValue({ payload: 'signed' })
+      mockEncodePaymentSignatureHeader.mockReturnValue({
+        'PAYMENT-SIGNATURE': 'header'
+      })
+
+      const server = { tool: vi.fn() } as unknown as McpServer
+      const config = evmConfig()
+      const spending = new SpendingTracker(config.budget)
+      registerX402Fetch(server, config, spending)
+
+      const handler = extractToolHandler(server)
+      const result = (await handler({
+        url: 'https://api.example.com/metered',
+        method: 'GET'
+      })) as ToolResult
+
+      const parsed = JSON.parse(result.content[0].text)
+      expect(parsed.payment.scheme).toBe('exact')
+      expect(parsed.payment.amount).toBe('0.050000 USDC')
+      expect(mockEnsurePermit2).not.toHaveBeenCalled()
+    })
   })
 })

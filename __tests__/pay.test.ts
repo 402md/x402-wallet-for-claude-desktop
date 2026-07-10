@@ -6,6 +6,11 @@ import { registerPay } from '../src/tools/pay.js'
 
 const mockCreatePaymentPayload = vi.fn()
 const mockEncodePaymentSignatureHeader = vi.fn()
+const mockEnsurePermit2 = vi.fn()
+
+vi.mock('../src/permit2.js', () => ({
+  ensurePermit2Allowance: (...args: unknown[]) => mockEnsurePermit2(...args)
+}))
 
 vi.mock('../src/clients.js', () => ({
   createHttpClient: vi.fn().mockResolvedValue({
@@ -53,6 +58,7 @@ function extractToolHandler(
 describe('pay tool', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockEnsurePermit2.mockResolvedValue({ status: 'sufficient' })
   })
 
   it('registers the tool with correct name', () => {
@@ -333,5 +339,134 @@ describe('pay tool', () => {
     const summary = spending.getSummary()
     expect(parseFloat(summary.spentSession)).toBe(0)
     expect(summary.recentPayments).toHaveLength(0)
+  })
+
+  describe('upto scheme', () => {
+    function evmConfig(): AppConfig {
+      return makeConfig({
+        canPay: true,
+        canPayEvm: true,
+        evmPrivateKey: '0xabc',
+        mode: 'EVM_ONLY'
+      })
+    }
+
+    it('signs an upto payment and records the authorized maximum', async () => {
+      mockCreatePaymentPayload.mockResolvedValue({
+        x402Version: 2,
+        payload: 'data'
+      })
+      mockEncodePaymentSignatureHeader.mockReturnValue({
+        'PAYMENT-SIGNATURE': 'header-value'
+      })
+
+      const server = { tool: vi.fn() } as unknown as McpServer
+      const config = evmConfig()
+      const spending = new SpendingTracker(config.budget)
+      registerPay(server, config, spending)
+
+      const handler = extractToolHandler(server)
+      const result = (await handler({
+        amount: '0.05',
+        recipient: '0xRecipient',
+        network: 'base-sepolia',
+        scheme: 'upto',
+        extra: { facilitatorAddress: '0xFacilitator', foo: 'bar' }
+      })) as { content: { text: string }[] }
+
+      const parsed = JSON.parse(result.content[0].text)
+      expect(parsed.scheme).toBe('upto')
+      expect(parsed.paymentHeader).toBe('header-value')
+      expect(parsed.note).toContain('UP TO')
+
+      // the caller's extra is passed through exactly
+      const paymentRequired = mockCreatePaymentPayload.mock.calls[0][0]
+      expect(paymentRequired.accepts[0].scheme).toBe('upto')
+      expect(paymentRequired.accepts[0].extra).toEqual({
+        facilitatorAddress: '0xFacilitator',
+        foo: 'bar'
+      })
+
+      // manual flow never assumes gasless sponsorship
+      expect(mockEnsurePermit2).toHaveBeenCalledWith(
+        expect.objectContaining({
+          requiredAmount: 50000n,
+          gaslessDeclared: false
+        })
+      )
+
+      const summary = spending.getSummary()
+      expect(parseFloat(summary.spentSession)).toBeCloseTo(0.05)
+      expect(summary.recentPayments[0].scheme).toBe('upto')
+      expect(summary.recentPayments[0].authorizedAmount).toBe('0.05')
+    })
+
+    it('rejects upto without facilitatorAddress in extra', async () => {
+      const server = { tool: vi.fn() } as unknown as McpServer
+      const config = evmConfig()
+      const spending = new SpendingTracker(config.budget)
+      registerPay(server, config, spending)
+
+      const handler = extractToolHandler(server)
+      const result = (await handler({
+        amount: '0.05',
+        recipient: '0xRecipient',
+        network: 'base-sepolia',
+        scheme: 'upto'
+      })) as { isError: boolean; content: { text: string }[] }
+
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toContain('facilitatorAddress')
+      expect(mockEnsurePermit2).not.toHaveBeenCalled()
+      expect(mockCreatePaymentPayload).not.toHaveBeenCalled()
+    })
+
+    it('rejects upto on Stellar networks', async () => {
+      const server = { tool: vi.fn() } as unknown as McpServer
+      const config = makeConfig({
+        canPay: true,
+        canPayStellar: true,
+        stellarSecret: 'STEST...',
+        mode: 'STELLAR_ONLY'
+      })
+      const spending = new SpendingTracker(config.budget)
+      registerPay(server, config, spending)
+
+      const handler = extractToolHandler(server)
+      const result = (await handler({
+        amount: '0.05',
+        recipient: 'GABC...',
+        network: 'stellar-testnet',
+        scheme: 'upto',
+        extra: { facilitatorAddress: 'GFAC...' }
+      })) as { isError: boolean; content: { text: string }[] }
+
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toContain('EVM networks')
+    })
+
+    it('does not record spending when the Permit2 approval fails', async () => {
+      mockEnsurePermit2.mockRejectedValue(
+        new Error('wallet has no ETH on base-sepolia to pay for gas')
+      )
+
+      const server = { tool: vi.fn() } as unknown as McpServer
+      const config = evmConfig()
+      const spending = new SpendingTracker(config.budget)
+      registerPay(server, config, spending)
+
+      const handler = extractToolHandler(server)
+      const result = (await handler({
+        amount: '0.05',
+        recipient: '0xRecipient',
+        network: 'base-sepolia',
+        scheme: 'upto',
+        extra: { facilitatorAddress: '0xFacilitator' }
+      })) as { isError: boolean; content: { text: string }[] }
+
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toContain('no ETH')
+      expect(parseFloat(spending.getSummary().spentSession)).toBe(0)
+    })
   })
 })

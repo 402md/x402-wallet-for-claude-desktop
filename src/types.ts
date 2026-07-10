@@ -33,4 +33,7 @@ export interface SpendingRecord {
   amount: string
   network: string
   timestamp: string
+  scheme?: string
+  /** Authorized maximum when it differs from the recorded amount (upto scheme) */
+  authorizedAmount?: string
 }
