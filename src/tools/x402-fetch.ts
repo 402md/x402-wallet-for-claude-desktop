@@ -2,7 +2,14 @@ import { z } from 'zod'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { AppConfig, PaymentNetwork } from '@/types.js'
 import type { SpendingTracker } from '@/spending.js'
-import { createHttpClient, isStellarNetwork, isEvmNetwork } from '@/clients.js'
+import {
+  createHttpClient,
+  isStellarNetwork,
+  isEvmNetwork,
+  isSolanaNetwork
+} from '@/clients.js'
+import { ensurePermit2Allowance } from '@/permit2.js'
+import type { EnsurePermit2Result } from '@/permit2.js'
 
 interface PaymentAccept {
   scheme: string
@@ -19,13 +26,16 @@ interface PaymentRequiredBody {
   error: string
   resource: { url: string; description: string; mimeType: string }
   accepts: PaymentAccept[]
+  extensions?: Record<string, unknown>
 }
 
 const CAIP2_TO_NETWORK: Record<string, PaymentNetwork> = {
   'stellar:pubnet': 'stellar',
   'stellar:testnet': 'stellar-testnet',
   'eip155:8453': 'base',
-  'eip155:84532': 'base-sepolia'
+  'eip155:84532': 'base-sepolia',
+  'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp': 'solana',
+  'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1': 'solana-devnet'
 }
 
 function caip2ToNetwork(caip2: string): PaymentNetwork | undefined {
@@ -38,6 +48,32 @@ function atomicToUsdc(atomicAmount: string, network: PaymentNetwork): string {
   const whole = raw / BigInt(10 ** decimals)
   const frac = raw % BigInt(10 ** decimals)
   return `${whole}.${frac.toString().padStart(decimals, '0')}`
+}
+
+function isSchemeSupported(scheme: string, network: PaymentNetwork): boolean {
+  if (scheme === 'exact') return true
+  // upto (Permit2) and auth-capture (escrow) only exist on EVM networks
+  if (scheme === 'upto' || scheme === 'auth-capture') {
+    return isEvmNetwork(network)
+  }
+  return false
+}
+
+const PAYMENT_ID_EXTENSION = 'payment-identifier'
+const PAYMENT_ID_PATTERN = /^[a-zA-Z0-9_-]{16,128}$/
+
+function generatePaymentId(): string {
+  return `pay_${crypto.randomUUID().replaceAll('-', '')}`
+}
+
+const GASLESS_EXTENSION_KEYS = [
+  'eip2612GasSponsoring',
+  'erc20ApprovalGasSponsoring'
+]
+
+function hasGaslessExtension(extensions?: Record<string, unknown>): boolean {
+  if (!extensions) return false
+  return GASLESS_EXTENSION_KEYS.some(key => key in extensions)
 }
 
 export function registerX402Fetch(
@@ -58,15 +94,22 @@ export function registerX402Fetch(
         .record(z.string())
         .optional()
         .describe('Optional HTTP headers as key-value pairs'),
-      body: z.string().optional().describe('Optional request body')
+      body: z.string().optional().describe('Optional request body'),
+      paymentId: z
+        .string()
+        .regex(PAYMENT_ID_PATTERN)
+        .optional()
+        .describe(
+          'Optional payment identifier (16-128 chars: alphanumerics, hyphens, underscores). Reuse the same id when retrying a payment so the server can deduplicate. Auto-generated when the server supports the payment-identifier extension.'
+        )
     },
-    async ({ url, method, headers, body }) => {
+    async ({ url, method, headers, body, paymentId }) => {
       if (!config.canPay) {
         return {
           content: [
             {
               type: 'text' as const,
-              text: 'No wallet configured. Set STELLAR_SECRET or EVM_PRIVATE_KEY environment variable.'
+              text: 'No wallet configured. Set STELLAR_SECRET, EVM_PRIVATE_KEY, or SOLANA_SECRET environment variable.'
             }
           ],
           isError: true
@@ -136,23 +179,26 @@ export function registerX402Fetch(
         }
 
         // Step 3: Find a payment option we can fulfill
+        // (server preference order, filtered by scheme + network support)
         const accept = paymentRequired.accepts.find(a => {
           const net = caip2ToNetwork(a.network)
           if (!net) return false
+          if (!isSchemeSupported(a.scheme, net)) return false
           if (isStellarNetwork(net) && config.canPayStellar) return true
           if (isEvmNetwork(net) && config.canPayEvm) return true
+          if (isSolanaNetwork(net) && config.canPaySolana) return true
           return false
         })
 
         if (!accept) {
-          const networks = paymentRequired.accepts
-            .map(a => a.network)
+          const options = paymentRequired.accepts
+            .map(a => `${a.network}/${a.scheme}`)
             .join(', ')
           return {
             content: [
               {
                 type: 'text' as const,
-                text: `Cannot fulfill payment. Server accepts networks: [${networks}] but wallet is not configured for any of them.`
+                text: `Cannot fulfill payment. Server accepts: [${options}] but wallet supports none of them.`
               }
             ],
             isError: true
@@ -162,12 +208,59 @@ export function registerX402Fetch(
         const network = caip2ToNetwork(accept.network)!
         const usdcAmount = atomicToUsdc(accept.amount, network)
 
-        // Step 4: Check spending limits
+        if (
+          accept.scheme === 'upto' &&
+          typeof accept.extra?.facilitatorAddress !== 'string'
+        ) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: 'Server offered an upto payment but the accept is missing extra.facilitatorAddress, which the upto scheme requires.'
+              }
+            ],
+            isError: true
+          }
+        }
+
+        // Step 4: Check spending limits (for upto this is the authorized maximum)
         spending.check(usdcAmount)
 
-        // Step 5: Sign the payment
+        // Step 4b: upto settles via Permit2 — make sure the one-time
+        // USDC approval exists (auto-approve unless the server sponsors it)
+        let permit2: EnsurePermit2Result | undefined
+        if (accept.scheme === 'upto' && isEvmNetwork(network)) {
+          permit2 = await ensurePermit2Allowance({
+            network,
+            config,
+            asset: accept.asset as `0x${string}`,
+            requiredAmount: BigInt(accept.amount),
+            gaslessDeclared: hasGaslessExtension(paymentRequired.extensions)
+          })
+        }
+
+        // Step 5: Sign the payment — only the accept we validated against
+        // the budget, so the SDK cannot pick a different option
         const httpClient = await createHttpClient(network, config)
-        const payload = await httpClient.createPaymentPayload(paymentRequired)
+        const payload = await httpClient.createPaymentPayload({
+          ...paymentRequired,
+          accepts: [accept]
+        })
+
+        // Attach a payment id when the server supports the extension
+        // (or the caller supplied one) so retries can be deduplicated
+        const serverSupportsPaymentId =
+          !!paymentRequired.extensions?.[PAYMENT_ID_EXTENSION]
+        const attachedPaymentId =
+          paymentId ??
+          (serverSupportsPaymentId ? generatePaymentId() : undefined)
+        if (attachedPaymentId) {
+          payload.extensions = {
+            ...(payload.extensions ?? {}),
+            [PAYMENT_ID_EXTENSION]: { info: { id: attachedPaymentId } }
+          }
+        }
+
         const signatureHeaders =
           httpClient.encodePaymentSignatureHeader(payload)
 
@@ -191,8 +284,30 @@ export function registerX402Fetch(
         const paidResponse = await fetch(url, retryOptions)
         const paidBody = await paidResponse.text()
 
-        // Step 7: Record the spending
-        spending.record(usdcAmount, accept.payTo, network)
+        // Step 7: Decode the settlement response — for upto the server
+        // reports the actual settled amount (≤ the authorized maximum)
+        let settle:
+          | { success: boolean; transaction: string; amount?: string }
+          | undefined
+        try {
+          settle = httpClient.getPaymentSettleResponse(name =>
+            paidResponse.headers.get(name)
+          )
+        } catch {
+          settle = undefined
+        }
+
+        const settledUsdc =
+          settle?.success && settle.amount
+            ? atomicToUsdc(settle.amount, network)
+            : usdcAmount
+
+        // Step 8: Record the spending (actual settled amount when known;
+        // falls back to the authorized maximum, which never undercounts)
+        spending.record(settledUsdc, accept.payTo, network, {
+          scheme: accept.scheme,
+          authorizedAmount: accept.scheme !== 'exact' ? usdcAmount : undefined
+        })
 
         return {
           content: [
@@ -204,9 +319,18 @@ export function registerX402Fetch(
                   statusText: paidResponse.statusText,
                   body: paidBody,
                   payment: {
-                    amount: `${usdcAmount} USDC`,
+                    scheme: accept.scheme,
+                    amount: `${settledUsdc} USDC`,
+                    authorized: `${usdcAmount} USDC`,
+                    settled:
+                      settle?.success && settle.amount
+                        ? `${settledUsdc} USDC`
+                        : null,
                     recipient: accept.payTo,
-                    network
+                    network,
+                    transaction: settle?.transaction ?? null,
+                    permit2Approval: permit2?.approvalTxHash ?? null,
+                    paymentId: attachedPaymentId ?? null
                   }
                 },
                 null,

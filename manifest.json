@@ -2,10 +2,10 @@
   "manifest_version": "0.3",
   "name": "x402-wallet",
   "display_name": "x402 Wallet by 402.md — USDC Payments for AI Agents",
-  "version": "0.1.4",
+  "version": "0.3.0",
   "icon": "icon.png",
-  "description": "Minimal x402 wallet for Claude. Check USDC balance and sign payments on Stellar or Base — no API keys, no accounts.",
-  "long_description": "Give Claude a USDC wallet. This extension adds three tools:\n\n- **check_balance** — View your USDC balance and wallet address\n- **pay** — Sign an x402 payment authorization (USDC on Stellar or Base)\n- **x402_fetch** — Fetch a URL with automatic x402 payment handling\n\nClaude handles everything else — discovering skills, reading SKILL.md docs, calling APIs. The wallet just signs payments when needed.\n\nBudget limits protect your funds: set max per call and max per day.",
+  "description": "Minimal x402 wallet for Claude. Check USDC balance and sign payments on Stellar, Base, or Solana — no API keys, no accounts.",
+  "long_description": "Give Claude a USDC wallet. This extension adds three tools:\n\n- **check_balance** — View your USDC balance and wallet address\n- **pay** — Sign an x402 payment authorization (USDC on Stellar, Base, or Solana)\n- **x402_fetch** — Fetch a URL with automatic x402 payment handling\n\nSupports the x402 \"exact\" scheme plus the EVM \"upto\" scheme (authorize a maximum, pay for actual usage — ideal for metered APIs) and \"auth-capture\" scheme (authorize a hold, server captures later). Payments on Solana are gasless — the facilitator pays the fees. Supports the payment-identifier extension for idempotent retries.\n\nClaude handles everything else — discovering skills, reading SKILL.md docs, calling APIs. The wallet just signs payments when needed.\n\nBudget limits protect your funds: set max per call and max per day.",
   "author": {
     "name": "402md",
     "url": "https://402.md"
@@ -35,6 +35,7 @@
       "env": {
         "STELLAR_SECRET": "${user_config.stellar_secret}",
         "EVM_PRIVATE_KEY": "${user_config.evm_private_key}",
+        "SOLANA_SECRET": "${user_config.solana_secret}",
         "NETWORK": "${user_config.network}",
         "MAX_PER_CALL": "${user_config.max_per_call}",
         "MAX_PER_DAY": "${user_config.max_per_day}"
@@ -57,10 +58,17 @@
       "required": false,
       "sensitive": true
     },
+    "solana_secret": {
+      "type": "string",
+      "title": "Solana Secret Key",
+      "description": "Your Solana wallet secret key (base58 string or JSON byte array). Stored securely in your OS keychain.",
+      "required": false,
+      "sensitive": true
+    },
     "network": {
       "type": "string",
       "title": "Default Network",
-      "description": "Payment network: stellar, stellar-testnet, base, or base-sepolia.",
+      "description": "Payment network: stellar, stellar-testnet, base, base-sepolia, solana, or solana-devnet.",
       "required": false,
       "default": "stellar-testnet"
     },
@@ -87,11 +95,11 @@
     },
     {
       "name": "pay",
-      "description": "Sign an x402 USDC payment authorization. Returns the X-PAYMENT header value."
+      "description": "Sign an x402 USDC payment authorization (exact, upto, or auth-capture scheme). Returns the X-PAYMENT header value."
     },
     {
       "name": "x402_fetch",
-      "description": "Fetch a URL with automatic x402 payment. Handles 402 responses by signing USDC payment and retrying with X-PAYMENT header."
+      "description": "Fetch a URL with automatic x402 payment (exact, upto, or auth-capture scheme). Handles 402 responses by signing USDC payment and retrying with X-PAYMENT header."
     }
   ],
 

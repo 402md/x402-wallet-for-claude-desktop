@@ -30,7 +30,12 @@ export class SpendingTracker {
     }
   }
 
-  record(amountUsdc: string, recipient: string, network: string): void {
+  record(
+    amountUsdc: string,
+    recipient: string,
+    network: string,
+    meta?: { scheme?: string; authorizedAmount?: string }
+  ): void {
     const amount = parseFloat(amountUsdc)
     this.spentToday += amount
     this.spentSession += amount
@@ -38,7 +43,11 @@ export class SpendingTracker {
       recipient,
       amount: amountUsdc,
       network,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      ...(meta?.scheme ? { scheme: meta.scheme } : {}),
+      ...(meta?.authorizedAmount
+        ? { authorizedAmount: meta.authorizedAmount }
+        : {})
     })
   }
 

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   isStellarNetwork,
   isEvmNetwork,
+  isSolanaNetwork,
   getCaip2Network
 } from '../src/clients.js'
 
@@ -42,9 +43,33 @@ describe('network helpers', () => {
     })
   })
 
+  describe('isSolanaNetwork', () => {
+    it('returns true for solana', () => {
+      expect(isSolanaNetwork('solana')).toBe(true)
+    })
+
+    it('returns true for solana-devnet', () => {
+      expect(isSolanaNetwork('solana-devnet')).toBe(true)
+    })
+
+    it('returns false for base and stellar', () => {
+      expect(isSolanaNetwork('base')).toBe(false)
+      expect(isSolanaNetwork('stellar')).toBe(false)
+    })
+  })
+
   describe('getCaip2Network', () => {
     it('maps stellar to stellar:pubnet', () => {
       expect(getCaip2Network('stellar')).toBe('stellar:pubnet')
+    })
+
+    it('maps solana networks to genesis-hash CAIP-2 ids', () => {
+      expect(getCaip2Network('solana')).toBe(
+        'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp'
+      )
+      expect(getCaip2Network('solana-devnet')).toBe(
+        'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1'
+      )
     })
 
     it('maps stellar-testnet to stellar:testnet', () => {

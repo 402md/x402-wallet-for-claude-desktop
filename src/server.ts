@@ -8,7 +8,7 @@ import { registerX402Fetch } from '@/tools/x402-fetch.js'
 export function createMcpServer(config: AppConfig): McpServer {
   const server = new McpServer({
     name: 'x402-wallet',
-    version: '0.1.0'
+    version: '0.3.0'
   })
 
   const spending = new SpendingTracker(config.budget)

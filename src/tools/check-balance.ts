@@ -8,7 +8,7 @@ export function registerCheckBalance(
 ): void {
   server.tool(
     'check_balance',
-    'Check USDC balance and wallet address on the configured network (Stellar or Base).',
+    'Check USDC balance and wallet address on the configured network (Stellar, Base, or Solana).',
     {},
     async () => {
       if (!config.canPay) {
@@ -16,7 +16,7 @@ export function registerCheckBalance(
           content: [
             {
               type: 'text' as const,
-              text: 'No wallet configured. Set STELLAR_SECRET or EVM_PRIVATE_KEY environment variable.'
+              text: 'No wallet configured. Set STELLAR_SECRET, EVM_PRIVATE_KEY, or SOLANA_SECRET environment variable.'
             }
           ],
           isError: true
