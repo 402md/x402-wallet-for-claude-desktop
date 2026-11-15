@@ -27,6 +27,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
+    "@paxiom/receipts": "^0.1.2",
     "@solana/kit": "^7.0.0",
     "@x402/core": "^2.17.0",
     "@x402/evm": "^2.17.0",

@@ -10,6 +10,7 @@ import {
 } from '@/clients.js'
 import { ensurePermit2Allowance } from '@/permit2.js'
 import type { EnsurePermit2Result } from '@/permit2.js'
+import { verifyDeliveryReceipt } from '@/receipt.js'
 
 interface PaymentAccept {
   scheme: string
@@ -131,6 +132,10 @@ export function registerX402Fetch(
         // If not 402, return the response directly
         if (initialResponse.status !== 402) {
           const responseBody = await initialResponse.text()
+          const initialReceipt = verifyDeliveryReceipt(
+            initialResponse.headers,
+            responseBody
+          )
           return {
             content: [
               {
@@ -139,7 +144,8 @@ export function registerX402Fetch(
                   {
                     status: initialResponse.status,
                     statusText: initialResponse.statusText,
-                    body: responseBody
+                    body: responseBody,
+                    ...(initialReceipt ? { receipt: initialReceipt } : {})
                   },
                   null,
                   2
@@ -283,6 +289,10 @@ export function registerX402Fetch(
 
         const paidResponse = await fetch(url, retryOptions)
         const paidBody = await paidResponse.text()
+        const deliveryReceipt = verifyDeliveryReceipt(
+          paidResponse.headers,
+          paidBody
+        )
 
         // Step 7: Decode the settlement response — for upto the server
         // reports the actual settled amount (≤ the authorized maximum)
@@ -331,7 +341,8 @@ export function registerX402Fetch(
                     transaction: settle?.transaction ?? null,
                     permit2Approval: permit2?.approvalTxHash ?? null,
                     paymentId: attachedPaymentId ?? null
-                  }
+                  },
+                  ...(deliveryReceipt ? { receipt: deliveryReceipt } : {})
                 },
                 null,
                 2

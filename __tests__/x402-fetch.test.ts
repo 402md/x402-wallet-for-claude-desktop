@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { generateReceiptKeyPair, issueReceipt } from '@paxiom/receipts'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { AppConfig } from '../src/types.js'
 import { SpendingTracker } from '../src/spending.js'
@@ -1078,6 +1079,159 @@ describe('x402_fetch tool', () => {
       expect(sentPayload.extensions).toBeUndefined()
       const parsed = JSON.parse(result.content[0].text)
       expect(parsed.payment.paymentId).toBeNull()
+    })
+  })
+
+  describe('X-Paxiom-Receipt delivery verification', () => {
+    const exactAccept = {
+      scheme: 'exact',
+      network: 'eip155:84532',
+      asset: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+      amount: '50000',
+      payTo: '0xRecipient',
+      maxTimeoutSeconds: 300,
+      extra: {}
+    }
+
+    function setupPaidReceiptFlow(
+      paidBodyText: string,
+      receiptHeader: string | null
+    ): (...args: unknown[]) => Promise<unknown> {
+      mockFetch.mockResolvedValueOnce({
+        status: 402,
+        statusText: 'Payment Required',
+        headers: { get: () => null },
+        json: vi.fn().mockResolvedValue({
+          x402Version: 2,
+          error: '',
+          resource: { url: '', description: '', mimeType: '' },
+          accepts: [exactAccept]
+        })
+      })
+      mockFetch.mockResolvedValueOnce({
+        status: 200,
+        statusText: 'OK',
+        headers: {
+          get: (name: string) =>
+            name.toLowerCase() === 'x-paxiom-receipt' ? receiptHeader : null
+        },
+        text: vi.fn().mockResolvedValue(paidBodyText)
+      })
+      mockCreatePaymentPayload.mockResolvedValue({ payload: 'signed' })
+      mockEncodePaymentSignatureHeader.mockReturnValue({
+        'PAYMENT-SIGNATURE': 'header'
+      })
+
+      const server = { tool: vi.fn() } as unknown as McpServer
+      const config = makeConfig({
+        canPay: true,
+        canPayEvm: true,
+        evmPrivateKey: '0xabc',
+        mode: 'EVM_ONLY'
+      })
+      const spending = new SpendingTracker(config.budget)
+      registerX402Fetch(server, config, spending)
+      return extractToolHandler(server)
+    }
+
+    it('verifies a matching Ed25519 delivery receipt on a paid response', async () => {
+      const sellerKeys = generateReceiptKeyPair({ keyId: 'seller_test_1' })
+      const output = { forecast: 'sunny', confidence: 0.98 }
+      const { receiptHeader } = issueReceipt({
+        privateKey: sellerKeys.privateKeyPem,
+        issuer: { name: 'Example Seller', keyId: sellerKeys.keyId },
+        service: {
+          name: 'Example Seller',
+          resource: 'https://api.example.com/paid',
+          method: 'GET'
+        },
+        payment: {
+          scheme: 'x402',
+          network: 'eip155:84532',
+          asset: 'USDC',
+          amountAtomic: '50000',
+          amountDisplay: '0.050000',
+          settlement: {
+            status: 'verify_only',
+            transactionHash: null,
+            checkedByPaxiom: false
+          }
+        },
+        output
+      })
+
+      const handler = setupPaidReceiptFlow(
+        JSON.stringify(output),
+        receiptHeader
+      )
+      const result = (await handler({
+        url: 'https://api.example.com/paid',
+        method: 'GET'
+      })) as ToolResult
+
+      const parsed = JSON.parse(result.content[0].text)
+      expect(parsed.receipt.valid).toBe(true)
+      expect(parsed.receipt.trustState).toBe('verified')
+      expect(parsed.receipt.checks.signature).toBe('pass')
+      expect(parsed.receipt.checks.outputHash).toBe('pass')
+      expect(parsed.receipt.receiptHash).toMatch(/^0x[0-9a-f]{64}$/)
+    })
+
+    it('flags output_hash_mismatch when the delivered body was modified after signing', async () => {
+      const sellerKeys = generateReceiptKeyPair({ keyId: 'seller_test_2' })
+      const { receiptHeader } = issueReceipt({
+        privateKey: sellerKeys.privateKeyPem,
+        issuer: { name: 'Example Seller', keyId: sellerKeys.keyId },
+        service: {
+          name: 'Example Seller',
+          resource: 'https://api.example.com/paid',
+          method: 'GET'
+        },
+        output: { forecast: 'sunny', confidence: 0.98 }
+      })
+
+      const handler = setupPaidReceiptFlow(
+        JSON.stringify({ forecast: 'storm', confidence: 0.12 }),
+        receiptHeader
+      )
+      const result = (await handler({
+        url: 'https://api.example.com/paid',
+        method: 'GET'
+      })) as ToolResult
+
+      const parsed = JSON.parse(result.content[0].text)
+      expect(parsed.receipt.valid).toBe(false)
+      expect(parsed.receipt.trustState).toBe('output_hash_mismatch')
+      expect(parsed.receipt.checks.signature).toBe('pass')
+      expect(parsed.receipt.checks.outputHash).toBe('fail')
+    })
+
+    it('reports schema_invalid on a malformed receipt header without failing the fetch', async () => {
+      const handler = setupPaidReceiptFlow(
+        JSON.stringify({ ok: true }),
+        '!!!not-valid-base64-json!!!'
+      )
+      const result = (await handler({
+        url: 'https://api.example.com/paid',
+        method: 'GET'
+      })) as ToolResult
+
+      expect(result.isError).toBeUndefined()
+      const parsed = JSON.parse(result.content[0].text)
+      expect(parsed.status).toBe(200)
+      expect(parsed.receipt.valid).toBe(false)
+      expect(parsed.receipt.trustState).toBe('schema_invalid')
+    })
+
+    it('omits receipt field when X-Paxiom-Receipt header is absent', async () => {
+      const handler = setupPaidReceiptFlow(JSON.stringify({ ok: true }), null)
+      const result = (await handler({
+        url: 'https://api.example.com/paid',
+        method: 'GET'
+      })) as ToolResult
+
+      const parsed = JSON.parse(result.content[0].text)
+      expect(parsed.receipt).toBeUndefined()
     })
   })
 })
